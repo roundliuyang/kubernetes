@@ -101,12 +101,14 @@ func NewCmdCreate(f cmdutil.Factory, ioStreams genericclioptions.IOStreams) *cob
 	// create子命令的相关选项
 	o := NewCreateOptions(ioStreams)
 
+	// create子命令的相关说明
 	cmd := &cobra.Command{
 		Use:                   "create -f FILENAME",
 		DisableFlagsInUseLine: true,
 		Short:                 i18n.T("Create a resource from a file or from stdin."),
 		Long:                  createLong,
 		Example:               createExample,
+		// 验证参数并运行
 		Run: func(cmd *cobra.Command, args []string) {
 			if cmdutil.IsFilenameSliceEmpty(o.FilenameOptions.Filenames, o.FilenameOptions.Kustomize) {
 				ioStreams.ErrOut.Write([]byte("Error: must specify one of -f and -k\n\n"))
@@ -116,6 +118,7 @@ func NewCmdCreate(f cmdutil.Factory, ioStreams genericclioptions.IOStreams) *cob
 			}
 			cmdutil.CheckErr(o.Complete(f, cmd))
 			cmdutil.CheckErr(o.ValidateArgs(cmd, args))
+			// 核心的运行代码逻辑是在这里的RunCreate
 			cmdutil.CheckErr(o.RunCreate(f, cmd))
 		},
 	}
@@ -124,6 +127,7 @@ func NewCmdCreate(f cmdutil.Factory, ioStreams genericclioptions.IOStreams) *cob
 	o.RecordFlags.AddFlags(cmd)
 
 	usage := "to use to create the resource"
+	// 加入文件名选项的flag -f，保存到o.FilenameOptions.Filenames中，对应上面
 	cmdutil.AddFilenameOptionFlags(cmd, &o.FilenameOptions, usage)
 	cmdutil.AddValidateFlags(cmd)
 	cmd.Flags().BoolVar(&o.EditBeforeCreate, "edit", o.EditBeforeCreate, "Edit the API resource before creating")
@@ -137,6 +141,7 @@ func NewCmdCreate(f cmdutil.Factory, ioStreams genericclioptions.IOStreams) *cob
 
 	o.PrintFlags.AddFlags(cmd)
 
+	// create的子命令，指定create对象
 	// create subcommands
 	cmd.AddCommand(NewCmdCreateNamespace(f, ioStreams))
 	cmd.AddCommand(NewCmdCreateQuota(f, ioStreams))
@@ -239,6 +244,7 @@ func (o *CreateOptions) RunCreate(f cmdutil.Factory, cmd *cobra.Command) error {
 	if o.EditBeforeCreate {
 		return RunEditOnCreate(f, o.PrintFlags, o.RecordFlags, o.IOStreams, cmd, &o.FilenameOptions, o.fieldManager)
 	}
+	// f为传入的Factory，主要是封装了与kube-apiserver交互客户端
 	schema, err := f.Validator(cmdutil.GetFlagBool(cmd, "validate"))
 	if err != nil {
 		return err
@@ -249,11 +255,13 @@ func (o *CreateOptions) RunCreate(f cmdutil.Factory, cmd *cobra.Command) error {
 		return err
 	}
 
+	// 实例化Builder，这块的逻辑比较复杂，我们先关注文件部分
 	r := f.NewBuilder().
 		Unstructured().
 		Schema(schema).
 		ContinueOnError().
 		NamespaceParam(cmdNamespace).DefaultNamespace().
+		// 读取文件信息，发现除了支持简单的本地文件，也支持标准输入和http/https协议访问的文件，保存为Visitor
 		FilenameParam(enforceNamespace, &o.FilenameOptions).
 		LabelSelectorParam(o.Selector).
 		Flatten().
@@ -264,6 +272,7 @@ func (o *CreateOptions) RunCreate(f cmdutil.Factory, cmd *cobra.Command) error {
 	}
 
 	count := 0
+	// 调用visit函数，创建资源
 	err = r.Visit(func(info *resource.Info, err error) error {
 		if err != nil {
 			return err
