@@ -187,11 +187,13 @@ func (i *Info) ResourceMapping() *meta.RESTMapping {
 	return i.Mapping
 }
 
+// VisitorList定义为[]Visitor，又实现了Visit方法，也就是将多个[]Visitor封装为一个Visitor
 // VisitorList implements Visit for the sub visitors it contains. The first error
 // returned from a child Visitor will terminate iteration.
 type VisitorList []Visitor
 
 // Visit implements Visitor
+// 发生error就立刻返回，不继续遍历
 func (l VisitorList) Visit(fn VisitorFunc) error {
 	for i := range l {
 		if err := l[i].Visit(fn); err != nil {
@@ -201,10 +203,12 @@ func (l VisitorList) Visit(fn VisitorFunc) error {
 	return nil
 }
 
+// EagerVisitorList 也是将多个[]Visitor封装为一个Visitor
 // EagerVisitorList implements Visit for the sub visitors it contains. All errors
 // will be captured and returned at the end of iteration.
 type EagerVisitorList []Visitor
 
+// 返回的错误暂存到[]error中，统一聚合
 // Visit implements Visitor, and gathers errors that occur during processing until
 // all sub visitors have been visited.
 func (l EagerVisitorList) Visit(fn VisitorFunc) error {
@@ -236,6 +240,7 @@ func ValidateSchema(data []byte, schema ContentValidator) error {
 	return nil
 }
 
+// HTTP用GET方法获取数据，底层也是复用StreamVisitor
 // URLVisitor downloads the contents of a URL, and if successful, returns
 // an info object representing the downloaded object.
 type URLVisitor struct {
@@ -304,6 +309,8 @@ func httpgetImpl(url string) (int, string, io.ReadCloser, error) {
 	return resp.StatusCode, resp.Status, resp.Body, nil
 }
 
+// 这里借鉴了装饰器的设计模式，将一个Visitor调用多个VisitorFunc方法，封装为调用一个VisitorFunc
+// 装饰器Visitor
 // DecoratedVisitor will invoke the decorators in order prior to invoking the visitor function
 // passed to Visit. An error will terminate the visit.
 type DecoratedVisitor struct {
@@ -321,6 +328,7 @@ func NewDecoratedVisitor(v Visitor, fn ...VisitorFunc) Visitor {
 	return DecoratedVisitor{v, fn}
 }
 
+// visitor遍历调用decorators中所有函数，有失败立即返回
 // Visit implements Visitor
 func (v DecoratedVisitor) Visit(fn VisitorFunc) error {
 	return v.visitor.Visit(func(info *Info, err error) error {
@@ -705,6 +713,7 @@ func CreateAndRefresh(info *Info) error {
 
 type FilterFunc func(info *Info, err error) (bool, error)
 
+// 过滤的Info
 type FilteredVisitor struct {
 	visitor Visitor
 	filters []FilterFunc
@@ -723,6 +732,7 @@ func (v FilteredVisitor) Visit(fn VisitorFunc) error {
 			return err
 		}
 		for _, filter := range v.filters {
+			// 检验Info是否满足条件，出错则退出
 			ok, err := filter(info, nil)
 			if err != nil {
 				return err

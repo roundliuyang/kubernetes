@@ -90,11 +90,14 @@ type ContentValidator interface {
 	ValidateBytes(data []byte) error
 }
 
+// Visitor 允许客户端遍历一组资源
+// 使用 Visitor 接口，客户端可以遍历 YAML 或其他来源中声明的一组资源，对每个资源执行统一的操作（例如打印、校验、应用到集群等）。
 // Visitor lets clients walk a list of resources.
 type Visitor interface {
 	Visit(VisitorFunc) error
 }
 
+// VisitorFunc 是用于匹配函数的访问逻辑，它配合 Visitor 接口使用。
 // VisitorFunc implements the Visitor interface for a matching function.
 // If there was a problem walking a list of resources, the incoming error
 // will describe the problem and the function can decide how to handle that error.
