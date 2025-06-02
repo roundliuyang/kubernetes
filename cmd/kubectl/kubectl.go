@@ -33,8 +33,11 @@ import (
 )
 
 func main() {
+	// 如果不调用rand.Seed，每次重新运行这个main函数，rand下的函数返回值始终一致
+	// Seed即随机的种子，每次用时间戳作为种子，就能保证随机性
 	rand.Seed(time.Now().UnixNano())
 
+	// 创建了kubectl命令的默认参数
 	command := cmd.NewDefaultKubectlCommand()
 
 	// TODO: once we switch everything over to Cobra commands, we can go back to calling
@@ -43,9 +46,12 @@ func main() {
 	pflag.CommandLine.SetNormalizeFunc(cliflag.WordSepNormalizeFunc)
 	pflag.CommandLine.AddGoFlagSet(goflag.CommandLine)
 	// cliflag.InitFlags()
+
+	// 日志的初始化与退出
 	logs.InitLogs()
 	defer logs.FlushLogs()
 
+	// 运行command
 	if err := command.Execute(); err != nil {
 		os.Exit(1)
 	}

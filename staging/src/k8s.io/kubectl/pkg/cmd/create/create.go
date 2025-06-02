@@ -98,6 +98,7 @@ func NewCreateOptions(ioStreams genericclioptions.IOStreams) *CreateOptions {
 
 // NewCmdCreate returns new initialized instance of create sub command
 func NewCmdCreate(f cmdutil.Factory, ioStreams genericclioptions.IOStreams) *cobra.Command {
+	// create子命令的相关选项
 	o := NewCreateOptions(ioStreams)
 
 	cmd := &cobra.Command{
