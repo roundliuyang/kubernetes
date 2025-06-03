@@ -95,7 +95,7 @@ func NewServerRunOptions() *ServerRunOptions {
 		InsecureServing:         kubeoptions.NewInsecureServingOptions(),
 		Audit:                   genericoptions.NewAuditOptions(),
 		Features:                genericoptions.NewFeatureOptions(),
-		Admission:               kubeoptions.NewAdmissionOptions(),
+		Admission:               kubeoptions.NewAdmissionOptions(), // admission选项
 		Authentication:          kubeoptions.NewBuiltInAuthenticationOptions().WithAll(),
 		Authorization:           kubeoptions.NewBuiltInAuthorizationOptions(),
 		CloudProvider:           kubeoptions.NewCloudProviderOptions(),

@@ -86,9 +86,11 @@ type Config struct {
 	CustomDial utilnet.DialFunc
 }
 
+// New这块的代码，我们要抓住核心变量authenticators和tokenAuthenticators，也就是各种认证方法
 // New returns an authenticator.Request or an error that supports the standard
 // Kubernetes authentication mechanisms.
 func (config Config) New() (authenticator.Request, *spec.SecurityDefinitions, error) {
+	// 核心变量authenticators和tokenAuthenticators
 	var authenticators []authenticator.Request
 	var tokenAuthenticators []authenticator.Token
 	securityDefinitions := spec.SecurityDefinitions{}
@@ -103,12 +105,14 @@ func (config Config) New() (authenticator.Request, *spec.SecurityDefinitions, er
 			config.RequestHeaderConfig.GroupHeaders,
 			config.RequestHeaderConfig.ExtraHeaderPrefixes,
 		)
+		// 1. 添加requestHeader
 		authenticators = append(authenticators, authenticator.WrapAudienceAgnosticRequest(config.APIAudiences, requestHeaderAuthenticator))
 	}
 
 	// X509 methods
 	if config.ClientCAContentProvider != nil {
 		certAuth := x509.NewDynamic(config.ClientCAContentProvider.VerifyOptions, x509.CommonNameUserConversion)
+		// 2. 添加ClientCA
 		authenticators = append(authenticators, certAuth)
 	}
 
@@ -118,8 +122,10 @@ func (config Config) New() (authenticator.Request, *spec.SecurityDefinitions, er
 		if err != nil {
 			return nil, nil, err
 		}
+		// 3. token 添加tokenfile
 		tokenAuthenticators = append(tokenAuthenticators, authenticator.WrapAudienceAgnosticToken(config.APIAudiences, tokenAuth))
 	}
+	// 4. token 添加 service account，分两种来源
 	if len(config.ServiceAccountKeyFiles) > 0 {
 		serviceAccountAuth, err := newLegacyServiceAccountAuthenticator(config.ServiceAccountKeyFiles, config.ServiceAccountLookup, config.APIAudiences, config.ServiceAccountTokenGetter)
 		if err != nil {
@@ -137,6 +143,7 @@ func (config Config) New() (authenticator.Request, *spec.SecurityDefinitions, er
 	if config.BootstrapToken {
 		if config.BootstrapTokenAuthenticator != nil {
 			// TODO: This can sometimes be nil because of
+			// 5. token 添加 bootstrap
 			tokenAuthenticators = append(tokenAuthenticators, authenticator.WrapAudienceAgnosticToken(config.APIAudiences, config.BootstrapTokenAuthenticator))
 		}
 	}
@@ -161,6 +168,7 @@ func (config Config) New() (authenticator.Request, *spec.SecurityDefinitions, er
 		if err != nil {
 			return nil, nil, err
 		}
+		// 6. token 添加 oidc
 		tokenAuthenticators = append(tokenAuthenticators, authenticator.WrapAudienceAgnosticToken(config.APIAudiences, oidcAuth))
 	}
 	if len(config.WebhookTokenAuthnConfigFile) > 0 {
@@ -169,9 +177,11 @@ func (config Config) New() (authenticator.Request, *spec.SecurityDefinitions, er
 			return nil, nil, err
 		}
 
+		// 7. token 添加 webhook
 		tokenAuthenticators = append(tokenAuthenticators, webhookTokenAuth)
 	}
 
+	// 8. 组合tokenAuthenticators到tokenAuthenticators中
 	if len(tokenAuthenticators) > 0 {
 		// Union the token authenticators
 		tokenAuth := tokenunion.New(tokenAuthenticators...)
@@ -190,6 +200,7 @@ func (config Config) New() (authenticator.Request, *spec.SecurityDefinitions, er
 		}
 	}
 
+	// 9. 没有任何认证方式且启用了Anonymous
 	if len(authenticators) == 0 {
 		if config.Anonymous {
 			return anonymous.NewAuthenticator(), &securityDefinitions, nil
@@ -197,6 +208,7 @@ func (config Config) New() (authenticator.Request, *spec.SecurityDefinitions, er
 		return nil, &securityDefinitions, nil
 	}
 
+	// 10. 组合authenticators
 	authenticator := union.New(authenticators...)
 
 	authenticator = group.NewAuthenticatedGroupAdder(authenticator)

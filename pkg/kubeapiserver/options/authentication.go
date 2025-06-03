@@ -464,6 +464,7 @@ func (o *BuiltInAuthenticationOptions) ApplyTo(authInfo *genericapiserver.Authen
 		authenticatorConfig.CustomDial = egressDialer
 	}
 
+	// 前面都是对认证config进行参数设置，这里才是真正的实例化
 	authInfo.Authenticator, openAPIConfig.SecurityDefinitions, err = authenticatorConfig.New()
 	if err != nil {
 		return err

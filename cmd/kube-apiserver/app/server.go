@@ -90,6 +90,8 @@ const (
 
 // NewAPIServerCommand creates a *cobra.Command object with default parameters
 func NewAPIServerCommand() *cobra.Command {
+
+	// server配置
 	s := options.NewServerRunOptions()
 	cmd := &cobra.Command{
 		Use: "kube-apiserver",
@@ -106,6 +108,7 @@ cluster's shared state through which all other components interact.`,
 			rest.SetDefaultWarningHandler(rest.NoWarnings{})
 			return nil
 		},
+		// 类似kubectl的源代码，kube-apiserver的命令行工具也使用了cobra，我们很快就能找到启动的入口
 		RunE: func(cmd *cobra.Command, args []string) error {
 			verflag.PrintAndExitIfRequested()
 			cliflag.PrintFlags(cmd.Flags())
@@ -121,8 +124,15 @@ cluster's shared state through which all other components interact.`,
 				return utilerrors.NewAggregate(errs)
 			}
 
+			// 这里包含2个参数，前者是参数completedOptions，后者是一个stopCh <-chan struct{}
 			return Run(completedOptions, genericapiserver.SetupSignalHandler())
 		},
+		/*
+			在这里，我们可以和kubectl结合起来思考：
+			kubectl是一个命令行工具，执行完命令就退出；kube-apiserver是一个常驻的服务器进程，监听端口
+			这里引入了一个stopCh <-chan struct{}，可以在启动后，用一个 <-stopCh 作为阻塞，使程序不退出
+			用channel阻塞进程退出，对比传统的方法 - 用一个永不退出的for循环，是一个很优雅的实现
+		*/
 		Args: func(cmd *cobra.Command, args []string) error {
 			for _, arg := range args {
 				if len(arg) > 0 {
@@ -175,6 +185,7 @@ func Run(completeOptions completedServerRunOptions, stopCh <-chan struct{}) erro
 	return prepared.Run(stopCh)
 }
 
+// 在CreateServerChain这个函数下，创建了3个server
 // CreateServerChain creates the apiservers connected via delegation.
 func CreateServerChain(completedOptions completedServerRunOptions, stopCh <-chan struct{}) (*aggregatorapiserver.APIAggregator, error) {
 	nodeTunneler, proxyTransport, err := CreateNodeDialer(completedOptions)
@@ -193,11 +204,14 @@ func CreateServerChain(completedOptions completedServerRunOptions, stopCh <-chan
 	if err != nil {
 		return nil, err
 	}
+	// API扩展服务，主要针对CRD
 	apiExtensionsServer, err := createAPIExtensionsServer(apiExtensionsConfig, genericapiserver.NewEmptyDelegate())
 	if err != nil {
 		return nil, err
 	}
 
+	// API核心服务，包括常见的Pod/Deployment/Service，我们今天的重点聚焦在这里
+	// 我会跳过很多非核心的配置参数，一开始就去研究细节，很影响整体代码的阅读效率
 	kubeAPIServer, err := CreateKubeAPIServer(kubeAPIServerConfig, apiExtensionsServer.GenericAPIServer)
 	if err != nil {
 		return nil, err
@@ -208,6 +222,7 @@ func CreateServerChain(completedOptions completedServerRunOptions, stopCh <-chan
 	if err != nil {
 		return nil, err
 	}
+	// API聚合服务，主要针对metrics
 	aggregatorServer, err := createAggregatorServer(aggregatorConfig, kubeAPIServer.GenericAPIServer, apiExtensionsServer.Informers)
 	if err != nil {
 		// we don't need special handling for innerStopCh because the aggregator server doesn't create any go routines
@@ -293,6 +308,7 @@ func CreateKubeAPIServerConfig(
 	[]admission.PluginInitializer,
 	error,
 ) {
+	// 创建通用配置genericConfig
 	genericConfig, versionedInformers, insecureServingInfo, serviceResolver, pluginInitializers, admissionPostStartHook, storageFactory, err := buildGenericConfig(s.ServerRunOptions, proxyTransport)
 	if err != nil {
 		return nil, nil, nil, nil, err
@@ -427,6 +443,7 @@ func CreateKubeAPIServerConfig(
 	return config, insecureServingInfo, serviceResolver, pluginInitializers, nil
 }
 
+// 通用配置的创建
 // BuildGenericConfig takes the master server options and produces the genericapiserver.Config associated with it
 func buildGenericConfig(
 	s *options.ServerRunOptions,
@@ -448,9 +465,11 @@ func buildGenericConfig(
 		return
 	}
 
+	// Insecure对应的非安全的通信，也就是HTTP
 	if lastErr = s.InsecureServing.ApplyTo(&insecureServingInfo, &genericConfig.LoopbackClientConfig); lastErr != nil {
 		return
 	}
+	// Secure对应的就是HTTPS
 	if lastErr = s.SecureServing.ApplyTo(&genericConfig.SecureServing, &genericConfig.LoopbackClientConfig); lastErr != nil {
 		return
 	}
@@ -464,6 +483,7 @@ func buildGenericConfig(
 		return
 	}
 
+	// OpenAPIConfig是对外提供的API文档
 	genericConfig.OpenAPIConfig = genericapiserver.DefaultOpenAPIConfig(generatedopenapi.GetOpenAPIDefinitions, openapinamer.NewDefinitionNamer(legacyscheme.Scheme, extensionsapiserver.Scheme, aggregatorscheme.Scheme))
 	genericConfig.OpenAPIConfig.Info.Title = "Kubernetes"
 	genericConfig.LongRunningFunc = filters.BasicLongRunningRequestCheck(
@@ -474,6 +494,7 @@ func buildGenericConfig(
 	kubeVersion := version.Get()
 	genericConfig.Version = &kubeVersion
 
+	// 这一块是storageFactory的实例化，可以看到采用的是etcd作为存储方案
 	storageFactoryConfig := kubeapiserver.NewStorageFactoryConfig()
 	storageFactoryConfig.APIResourceConfig = genericConfig.MergedResourceConfig
 	completedStorageFactoryConfig, err := storageFactoryConfig.Complete(s.Etcd)
@@ -509,11 +530,13 @@ func buildGenericConfig(
 	}
 	versionedInformers = clientgoinformers.NewSharedInformerFactory(clientgoExternalClient, 10*time.Minute)
 
+	// Authentication 认证相关
 	// Authentication.ApplyTo requires already applied OpenAPIConfig and EgressSelector if present
 	if lastErr = s.Authentication.ApplyTo(&genericConfig.Authentication, genericConfig.SecureServing, genericConfig.EgressSelector, genericConfig.OpenAPIConfig, clientgoExternalClient, versionedInformers); lastErr != nil {
 		return
 	}
 
+	// Authorization 授权相关
 	genericConfig.Authorization.Authorizer, genericConfig.RuleResolver, err = BuildAuthorizer(s, genericConfig.EgressSelector, versionedInformers)
 	if err != nil {
 		lastErr = fmt.Errorf("invalid authorization config: %v", err)
@@ -540,6 +563,7 @@ func buildGenericConfig(
 		return
 	}
 
+	// Admission 准入机制
 	err = s.Admission.ApplyTo(
 		genericConfig,
 		versionedInformers,
@@ -569,6 +593,7 @@ func BuildAuthorizer(s *options.ServerRunOptions, EgressSelector *egressselector
 		authorizationConfig.CustomDial = egressDialer
 	}
 
+	// 与上面一致，实例化是在这个New中
 	return authorizationConfig.New()
 }
 

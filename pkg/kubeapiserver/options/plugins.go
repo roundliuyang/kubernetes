@@ -108,6 +108,7 @@ var AllOrderedPlugins = []string{
 // RegisterAllAdmissionPlugins registers all admission plugins and
 // sets the recommended plugins order.
 func RegisterAllAdmissionPlugins(plugins *admission.Plugins) {
+	// 这里有很多plugin的注册
 	admit.Register(plugins) // DEPRECATED as no real meaning
 	alwayspullimages.Register(plugins)
 	antiaffinity.Register(plugins)

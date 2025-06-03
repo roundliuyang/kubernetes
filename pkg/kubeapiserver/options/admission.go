@@ -51,6 +51,7 @@ type AdmissionOptions struct {
 //  Servers that do care can overwrite/append that field after creation.
 func NewAdmissionOptions() *AdmissionOptions {
 	options := genericoptions.NewAdmissionOptions()
+	// 注册准入机制
 	// register all admission plugins
 	RegisterAllAdmissionPlugins(options.Plugins)
 	// set RecommendedPluginOrder

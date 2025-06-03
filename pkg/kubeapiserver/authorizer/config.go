@@ -63,6 +63,7 @@ type Config struct {
 // New returns the right sort of union of multiple authorizer.Authorizer objects
 // based on the authorizationMode or an error.
 func (config Config) New() (authorizer.Authorizer, authorizer.RuleResolver, error) {
+	// 必须传入一个Authorizer机制
 	if len(config.AuthorizationModes) == 0 {
 		return nil, nil, fmt.Errorf("at least one authorization mode must be passed")
 	}
@@ -73,6 +74,7 @@ func (config Config) New() (authorizer.Authorizer, authorizer.RuleResolver, erro
 	)
 
 	for _, authorizationMode := range config.AuthorizationModes {
+		// 具体的mode定义，可以跳转到对应的链接去看，今天不细讲
 		// Keep cases in sync with constant list in k8s.io/kubernetes/pkg/kubeapiserver/authorizer/modes/modes.go.
 		switch authorizationMode {
 		case modes.ModeNode:

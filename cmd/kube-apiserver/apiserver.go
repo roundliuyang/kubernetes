@@ -32,6 +32,7 @@ import (
 func main() {
 	rand.Seed(time.Now().UnixNano())
 
+	// 启动命令
 	command := app.NewAPIServerCommand()
 
 	// TODO: once we switch everything over to Cobra commands, we can go back to calling

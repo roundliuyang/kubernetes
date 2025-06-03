@@ -119,6 +119,7 @@ type ReinvocationContext interface {
 	Value(plugin string) interface{}
 }
 
+// 查看一下Interface的定义，就是对准入机制的控制
 // Interface is an abstract, pluggable interface for Admission Control decisions.
 type Interface interface {
 	// Handles returns true if this admission controller can handle the given operation

@@ -85,6 +85,7 @@ func (ps *Plugins) Register(name string, plugin Factory) {
 	ps.registry[name] = plugin
 }
 
+// 再去看看获取plugin的地方
 // getPlugin creates an instance of the named plugin.  It returns `false` if the
 // the name is not known. The error is returned only when the named provider was
 // known but failed to initialize.  The config parameter specifies the io.Reader
@@ -92,6 +93,7 @@ func (ps *Plugins) Register(name string, plugin Factory) {
 func (ps *Plugins) getPlugin(name string, config io.Reader) (Interface, bool, error) {
 	ps.lock.Lock()
 	defer ps.lock.Unlock()
+	// 我们再去研究ps.registry这个参数是在哪里被初始化的
 	f, found := ps.registry[name]
 	if !found {
 		return nil, false, nil
@@ -135,6 +137,7 @@ func (ps *Plugins) NewFromPlugins(pluginNames []string, configProvider ConfigPro
 			return nil, err
 		}
 
+		// InitPlugin 为初始化的工作
 		plugin, err := ps.InitPlugin(pluginName, pluginConfig, pluginInitializer)
 		if err != nil {
 			return nil, err
@@ -170,6 +173,7 @@ func (ps *Plugins) InitPlugin(name string, config io.Reader, pluginInitializer P
 		return nil, nil
 	}
 
+	// 获取plugin
 	plugin, found, err := ps.getPlugin(name, config)
 	if err != nil {
 		return nil, fmt.Errorf("couldn't init admission plugin %q: %v", name, err)
