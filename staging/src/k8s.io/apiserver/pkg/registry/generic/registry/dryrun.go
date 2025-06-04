@@ -24,6 +24,7 @@ import (
 	"k8s.io/apiserver/pkg/storage"
 )
 
+// DryRunnableStorage中的Storage是一个Interface
 type DryRunnableStorage struct {
 	Storage storage.Interface
 	Codec   runtime.Codec
@@ -40,6 +41,7 @@ func (s *DryRunnableStorage) Create(ctx context.Context, key string, obj, out ru
 		}
 		return s.copyInto(obj, out)
 	}
+	// 这里，就是Create的真正调用
 	return s.Storage.Create(ctx, key, obj, out, ttl)
 }
 

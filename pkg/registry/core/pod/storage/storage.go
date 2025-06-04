@@ -46,6 +46,7 @@ import (
 	podrest "k8s.io/kubernetes/pkg/registry/core/pod/rest"
 )
 
+// PodStorage 是 Pod 存储的实现，里面包含了多个存储的定义
 // PodStorage includes storage for pods and all sub resources
 type PodStorage struct {
 	Pod                 *REST

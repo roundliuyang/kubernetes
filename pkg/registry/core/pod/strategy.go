@@ -51,6 +51,7 @@ import (
 	proxyutil "k8s.io/kubernetes/pkg/proxy/util"
 )
 
+// podStrategy 是封装了 Pod 的各类动作，这里我们先关注create这个操作
 // podStrategy implements behavior for Pods
 type podStrategy struct {
 	runtime.ObjectTyper
