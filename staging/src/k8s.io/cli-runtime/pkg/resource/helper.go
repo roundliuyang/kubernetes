@@ -163,7 +163,13 @@ func (m *Helper) CreateWithOptions(namespace string, modify bool, obj runtime.Ob
 	return m.createResource(m.RESTClient, m.Resource, namespace, obj, options)
 }
 
+/*
+到这里，我们发现了2个关键性的定义:
+1. RESTClient 与kube-apiserver交互的RESTful风格的客户端
+2. runtime.Object 资源对象的抽象，包括Pod/Deployment/Service等各类资源
+*/
 func (m *Helper) createResource(c RESTClient, resource, namespace string, obj runtime.Object, options *metav1.CreateOptions) (runtime.Object, error) {
+	// RESTful接口风格中，POST请求对应的就是CREATE方法
 	return c.Post().
 		NamespaceIfScoped(namespace, m.NamespaceScoped).
 		Resource(resource).

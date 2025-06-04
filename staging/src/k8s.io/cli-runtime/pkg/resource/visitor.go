@@ -514,6 +514,7 @@ type FileVisitor struct {
 	*StreamVisitor
 }
 
+// 底层调用的是StreamVisitor的逻辑
 // Visit in a FileVisitor is just taking care of opening/closing files
 func (v *FileVisitor) Visit(fn VisitorFunc) error {
 	var f *os.File
@@ -595,6 +596,7 @@ func (v *StreamVisitor) Visit(fn VisitorFunc) error {
 		if err := ValidateSchema(ext.Raw, v.Schema); err != nil {
 			return fmt.Errorf("error validating %q: %v", v.Source, err)
 		}
+		// 这里就是返回info的地方
 		info, err := v.infoForData(ext.Raw, v.Source)
 		if err != nil {
 			if fnErr := fn(info, err); fnErr != nil {

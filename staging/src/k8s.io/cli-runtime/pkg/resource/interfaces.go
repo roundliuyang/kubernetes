@@ -47,6 +47,7 @@ type RESTClient interface {
 // RequestTransform is a function that is given a chance to modify the outgoing request.
 type RequestTransform func(*rest.Request)
 
+// 从返回值来看，client包括默认的REST client和配置选项
 // NewClientWithOptions wraps the provided RESTClient and invokes each transform on each
 // newly created request.
 func NewClientWithOptions(c RESTClient, transforms ...RequestTransform) RESTClient {

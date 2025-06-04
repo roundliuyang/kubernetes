@@ -388,6 +388,7 @@ func (unstructuredJSONScheme) Identifier() runtime.Identifier {
 	return unstructuredJSONSchemeIdentifier
 }
 
+// 逐层往下找，对应的Decode方法的实现，就是对应的数据解析成data：
 func (s unstructuredJSONScheme) decode(data []byte) (runtime.Object, error) {
 	type detector struct {
 		Items gojson.RawMessage

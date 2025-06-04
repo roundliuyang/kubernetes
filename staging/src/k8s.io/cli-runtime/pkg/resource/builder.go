@@ -263,7 +263,8 @@ func (b *Builder) Unstructured() *Builder {
 		localFn:      b.isLocal,
 		restMapperFn: b.restMapperFn,
 		clientFn:     b.getClient,
-		decoder:      &metadataValidatingDecoder{unstructured.UnstructuredJSONScheme},
+		// 我们查找资源用到的是这个decoder
+		decoder: &metadataValidatingDecoder{unstructured.UnstructuredJSONScheme},
 	}
 
 	return b
@@ -873,6 +874,7 @@ func (b *Builder) visitBySelector() *Result {
 	return result
 }
 
+// 大致看一下这些函数，我们可以在Unstructured()中看到getClient函数，其实这就是我们要找的函数
 func (b *Builder) getClient(gv schema.GroupVersion) (RESTClient, error) {
 	var (
 		client RESTClient

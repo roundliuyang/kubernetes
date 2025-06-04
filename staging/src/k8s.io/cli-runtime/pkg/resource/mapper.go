@@ -35,10 +35,12 @@ type mapper struct {
 	decoder      runtime.Decoder
 }
 
+// 再往下一层看，来到mapper层，也就是kubernetes的资源对象映射关系
 // InfoForData creates an Info object for the given data. An error is returned
 // if any of the decoding or client lookup steps fail. Name and namespace will be
 // set into Info if the mapping's MetadataAccessor can retrieve them.
 func (m *mapper) infoForData(data []byte, source string) (*Info, error) {
+	// 这里就是我们返回Object的地方，其中GVK是Group/Version/Kind的缩写
 	obj, gvk, err := m.decoder.Decode(data, nil, nil)
 	if err != nil {
 		return nil, fmt.Errorf("unable to decode %q: %v", source, err)
