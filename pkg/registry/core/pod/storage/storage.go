@@ -67,6 +67,7 @@ type REST struct {
 	proxyTransport http.RoundTripper
 }
 
+// 查看Pod初始化
 // NewStorage returns a RESTStorage object that will work against pods.
 func NewStorage(optsGetter generic.RESTOptionsGetter, k client.ConnectionInfoGetter, proxyTransport http.RoundTripper, podDisruptionBudgetClient policyclient.PodDisruptionBudgetsGetter) (PodStorage, error) {
 
@@ -76,6 +77,7 @@ func NewStorage(optsGetter generic.RESTOptionsGetter, k client.ConnectionInfoGet
 		PredicateFunc:            registrypod.MatchPod,
 		DefaultQualifiedResource: api.Resource("pods"),
 
+		// 增改删的策略
 		CreateStrategy:      registrypod.Strategy,
 		UpdateStrategy:      registrypod.Strategy,
 		DeleteStrategy:      registrypod.Strategy,

@@ -76,6 +76,7 @@ func NewAPIServerHandler(name string, s runtime.NegotiatedSerializer, handlerCha
 		nonGoRestfulMux.NotFoundHandler(notFoundHandler)
 	}
 
+	// 采用了 github.com/emicklei/go-restful 这个库作为 RESTful 接口的设计，目前了解即可
 	gorestfulContainer := restful.NewContainer()
 	gorestfulContainer.ServeMux = http.NewServeMux()
 	gorestfulContainer.Router(restful.CurlyRouter{}) // e.g. for proxy/{kind}/{name}/{*}
@@ -154,7 +155,7 @@ func (d director) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	d.nonGoRestfulMux.ServeHTTP(w, req)
 }
 
-//TODO: Unify with RecoverPanics?
+// TODO: Unify with RecoverPanics?
 func logStackOnRecover(s runtime.NegotiatedSerializer, panicReason interface{}, w http.ResponseWriter) {
 	var buffer bytes.Buffer
 	buffer.WriteString(fmt.Sprintf("recover from panic situation: - %v\r\n", panicReason))

@@ -24,6 +24,7 @@ import (
 
 // All kubectl code should eventually switch to use this Registry and Scheme instead of the global ones.
 
+// 又查询到Scheme的初始化。Schema可以理解为Kubernetes的注册表，即所有的资源类型必须先注册进Schema才可使用
 // Scheme is the default instance of runtime.Scheme to which types in the Kubernetes API are already registered.
 var Scheme = runtime.NewScheme()
 
