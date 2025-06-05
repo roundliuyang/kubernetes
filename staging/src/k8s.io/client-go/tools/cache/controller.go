@@ -182,6 +182,7 @@ func (c *controller) LastSyncResourceVersion() string {
 // also be helpful.
 func (c *controller) processLoop() {
 	for {
+		// Pop出Object元素
 		obj, err := c.config.Queue.Pop(PopProcessFunc(c.config.Process))
 		if err != nil {
 			if err == ErrFIFOClosed {
@@ -189,6 +190,7 @@ func (c *controller) processLoop() {
 			}
 			if c.config.RetryOnError {
 				// This is the safe way to re-enqueue.
+				// 重新进队列
 				c.config.Queue.AddIfNotPresent(obj)
 			}
 		}

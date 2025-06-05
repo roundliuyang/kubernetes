@@ -103,10 +103,11 @@ func Pop(queue Queue) interface{} {
 // recent version will be processed. This can't be done with a channel
 //
 // FIFO solves this use case:
-//  * You want to process every object (exactly) once.
-//  * You want to process the most recent version of the object when you process it.
-//  * You do not want to process deleted objects, they should be removed from the queue.
-//  * You do not want to periodically reprocess objects.
+//   - You want to process every object (exactly) once.
+//   - You want to process the most recent version of the object when you process it.
+//   - You do not want to process deleted objects, they should be removed from the queue.
+//   - You do not want to periodically reprocess objects.
+//
 // Compare with DeltaFIFO for other use cases.
 type FIFO struct {
 	lock sync.RWMutex
@@ -269,6 +270,7 @@ func (f *FIFO) IsClosed() bool {
 	return false
 }
 
+// 去查看Pop的具体实现
 // Pop waits until an item is ready and processes it. If multiple items are
 // ready, they are returned in the order in which they were added/updated.
 // The item is removed from the queue (and the store) before it is processed,
@@ -294,6 +296,7 @@ func (f *FIFO) Pop(process PopProcessFunc) (interface{}, error) {
 		if f.initialPopulationCount > 0 {
 			f.initialPopulationCount--
 		}
+		// 调用process去处理item，然后返回
 		item, ok := f.items[id]
 		if !ok {
 			// Item may have been deleted subsequently.

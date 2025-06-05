@@ -195,6 +195,7 @@ func NewSharedInformer(lw ListerWatcher, exampleObject runtime.Object, defaultEv
 	return NewSharedIndexInformer(lw, exampleObject, defaultEventHandlerResyncPeriod, Indexers{})
 }
 
+// 分发process的创建
 // NewSharedIndexInformer creates a new instance for the listwatcher.
 // The created informer will not do resyncs if the given
 // defaultEventHandlerResyncPeriod is zero.  Otherwise: for each
@@ -210,7 +211,8 @@ func NewSharedInformer(lw ListerWatcher, exampleObject runtime.Object, defaultEv
 func NewSharedIndexInformer(lw ListerWatcher, exampleObject runtime.Object, defaultEventHandlerResyncPeriod time.Duration, indexers Indexers) SharedIndexInformer {
 	realClock := &clock.RealClock{}
 	sharedIndexInformer := &sharedIndexInformer{
-		processor:                       &sharedProcessor{clock: realClock},
+		processor: &sharedProcessor{clock: realClock},
+		// indexer 的初始化
 		indexer:                         NewIndexer(DeletionHandlingMetaNamespaceKeyFunc, indexers),
 		listerWatcher:                   lw,
 		objectType:                      exampleObject,
@@ -375,7 +377,7 @@ func (s *sharedIndexInformer) Run(stopCh <-chan struct{}) {
 		EmitDeltaTypeReplaced: true,
 	})
 
-	// 传入这个fifo到cfg
+	// 传入这个fifo到cfg, 然后去查一下 PopProcessFunc 的定义，在创建controller前
 	cfg := &Config{
 		Queue:            fifo,
 		ListerWatcher:    s.listerWatcher,
@@ -535,9 +537,12 @@ func (s *sharedIndexInformer) HandleDeltas(obj interface{}) error {
 	// from oldest to newest
 	for _, d := range obj.(Deltas) {
 		switch d.Type {
+		// 增、改、替换、同步
 		case Sync, Replaced, Added, Updated:
 			s.cacheMutationDetector.AddObject(d.Object)
+			// 先去indexer查询
 			if old, exists, err := s.indexer.Get(d.Object); err == nil && exists {
+				// 如果数据已经存在，就执行Update逻辑
 				if err := s.indexer.Update(d.Object); err != nil {
 					return err
 				}
@@ -556,23 +561,28 @@ func (s *sharedIndexInformer) HandleDeltas(obj interface{}) error {
 						}
 					}
 				}
+				// 分发Update事件
 				s.processor.distribute(updateNotification{oldObj: old, newObj: d.Object}, isSync)
 			} else {
+				// 没查到数据，就执行Add操作
 				if err := s.indexer.Add(d.Object); err != nil {
 					return err
 				}
 				s.processor.distribute(addNotification{newObj: d.Object}, false)
 			}
 		case Deleted:
+			// 去indexer删除
 			if err := s.indexer.Delete(d.Object); err != nil {
 				return err
 			}
+			// 分发 delete 事件
 			s.processor.distribute(deleteNotification{oldObj: d.Object}, false)
 		}
 	}
 	return nil
 }
 
+// sharedProcessor的结构
 // sharedProcessor has a collection of processorListener and can
 // distribute a notification object to its listeners.  There are two
 // kinds of distribute operations.  The sync distributions go to a
@@ -581,8 +591,11 @@ func (s *sharedIndexInformer) HandleDeltas(obj interface{}) error {
 // The non-sync distributions go to every listener.
 type sharedProcessor struct {
 	listenersStarted bool
-	listenersLock    sync.RWMutex
-	listeners        []*processorListener
+	// 读写锁
+	listenersLock sync.RWMutex
+	// 普通监听列表
+	listeners []*processorListener
+	// 同步监听列表
 	syncingListeners []*processorListener
 	clock            clock.Clock
 	wg               wait.Group
@@ -604,10 +617,12 @@ func (p *sharedProcessor) addListenerLocked(listener *processorListener) {
 	p.syncingListeners = append(p.syncingListeners, listener)
 }
 
+// 查看distribute函数
 func (p *sharedProcessor) distribute(obj interface{}, sync bool) {
 	p.listenersLock.RLock()
 	defer p.listenersLock.RUnlock()
 
+	// 将object分发到 同步监听 或者 普通监听 的列表
 	if sync {
 		for _, listener := range p.syncingListeners {
 			listener.add(obj)
@@ -732,6 +747,7 @@ func newProcessListener(handler ResourceEventHandler, requestedResyncPeriod, res
 	return ret
 }
 
+// 这个add的操作是利用了channel
 func (p *processorListener) add(notification interface{}) {
 	p.addCh <- notification
 }
