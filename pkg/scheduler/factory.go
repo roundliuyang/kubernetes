@@ -200,15 +200,18 @@ func (c *Configurator) create() (*Scheduler, error) {
 	}, nil
 }
 
+// 创建
 // createFromProvider creates a scheduler from the name of a registered algorithm provider.
 func (c *Configurator) createFromProvider(providerName string) (*Scheduler, error) {
 	klog.V(2).Infof("Creating scheduler from algorithm provider '%v'", providerName)
+	// 实例化算法的Registry
 	r := algorithmprovider.NewRegistry()
 	defaultPlugins, exist := r[providerName]
 	if !exist {
 		return nil, fmt.Errorf("algorithm provider %q is not registered", providerName)
 	}
 
+	// 将各种算法作为plugin进行设置
 	for i := range c.profiles {
 		prof := &c.profiles[i]
 		plugins := &schedulerapi.Plugins{}

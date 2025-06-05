@@ -50,11 +50,14 @@ const ClusterAutoscalerProvider = "ClusterAutoscalerProvider"
 // Registry is a collection of all available algorithm providers.
 type Registry map[string]*schedulerapi.Plugins
 
+// 从这个初始化中可以看到，主要分为2类：默认与ClusterAutoscaler两种算法
 // NewRegistry returns an algorithm provider registry instance.
 func NewRegistry() Registry {
+	// 默认算法包括过滤、打分、绑定等，有兴趣的去源码中逐个阅读
 	defaultConfig := getDefaultConfig()
 	applyFeatureGates(defaultConfig)
 
+	// ClusterAutoscaler 是集群自动扩展的算法，被单独拎出来，
 	caConfig := getClusterAutoscalerConfig()
 	applyFeatureGates(caConfig)
 
@@ -63,6 +66,11 @@ func NewRegistry() Registry {
 		ClusterAutoscalerProvider:                 caConfig,
 	}
 }
+
+/*
+	在这里，熟悉k8s的朋友会有个疑问：以前听说kubernets的调度有个Predicate和Priority两个算法，这里怎么没有分类？
+	这个疑问，我们在后面具体场景时再进行分析。
+*/
 
 // ListAlgorithmProviders lists registered algorithm providers.
 func ListAlgorithmProviders() string {

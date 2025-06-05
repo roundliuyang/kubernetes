@@ -14,6 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+// 为了加深大家对Plugin的印象，我选择一个最简单的示例：根据Pod的spec字段中的NodeName，分配到指定名称的节点
 package nodename
 
 import (
@@ -29,6 +30,7 @@ type NodeName struct{}
 
 var _ framework.FilterPlugin = &NodeName{}
 
+// 这个调度算法的名称和错误信息
 const (
 	// Name is the name of the plugin used in the plugin registry and configurations.
 	Name = "NodeName"
@@ -37,27 +39,37 @@ const (
 	ErrReason = "node(s) didn't match the requested hostname"
 )
 
+// 调度算法的名字
 // Name returns name of the plugin. It is used in logs, etc.
 func (pl *NodeName) Name() string {
 	return Name
 }
 
+// 过滤功能，这个就是NodeName算法的实现
 // Filter invoked at the filter extension point.
 func (pl *NodeName) Filter(ctx context.Context, _ *framework.CycleState, pod *v1.Pod, nodeInfo *framework.NodeInfo) *framework.Status {
+	// 找不到Node
 	if nodeInfo.Node() == nil {
 		return framework.NewStatus(framework.Error, "node not found")
 	}
+	// 匹配不到，返回错误
 	if !Fits(pod, nodeInfo) {
 		return framework.NewStatus(framework.UnschedulableAndUnresolvable, ErrReason)
 	}
 	return nil
 }
 
+/*
+  匹配的算法，两种条件满足一个就认为成功
+  1. spec没有填NodeName
+  2.spec的NodeName和节点匹配
+*/
 // Fits actually checks if the pod fits the node.
 func Fits(pod *v1.Pod, nodeInfo *framework.NodeInfo) bool {
 	return len(pod.Spec.NodeName) == 0 || pod.Spec.NodeName == nodeInfo.Node().Name
 }
 
+// 初始化
 // New initializes a new plugin and returns it.
 func New(_ runtime.Object, _ framework.FrameworkHandle) (framework.Plugin, error) {
 	return &NodeName{}, nil

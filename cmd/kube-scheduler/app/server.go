@@ -116,6 +116,7 @@ for more information about scheduling and the kube-scheduler component.`,
 	return cmd
 }
 
+// kube-scheduler 类似于kube-apiserver，是个常驻进程，查看其对应的Run函数
 // runCommand runs the scheduler.
 func runCommand(cmd *cobra.Command, opts *options.Options, registryOptions ...Option) error {
 	verflag.PrintAndExitIfRequested()
@@ -124,6 +125,7 @@ func runCommand(cmd *cobra.Command, opts *options.Options, registryOptions ...Op
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	// 根据入参，返回配置cc与调度sched
 	cc, sched, err := Setup(ctx, opts, registryOptions...)
 	if err != nil {
 		return err
@@ -137,14 +139,17 @@ func runCommand(cmd *cobra.Command, opts *options.Options, registryOptions ...Op
 		return nil
 	}
 
+	// 运行
 	return Run(ctx, cc, sched)
 }
 
+// 运行调度策略
 // Run executes the scheduler based on the given configuration. It only returns on error or when context is done.
 func Run(ctx context.Context, cc *schedulerserverconfig.CompletedConfig, sched *scheduler.Scheduler) error {
 	// To help debugging, immediately log version
 	klog.V(1).Infof("Starting Kubernetes Scheduler version %+v", version.Get())
 
+	// 将配置注册到configz中，会保存在一个全局map里
 	// Configz registration.
 	if cz, err := configz.New("componentconfig"); err == nil {
 		cz.Set(cc.ComponentConfig)
@@ -152,9 +157,11 @@ func Run(ctx context.Context, cc *schedulerserverconfig.CompletedConfig, sched *
 		return fmt.Errorf("unable to register configz: %s", err)
 	}
 
+	// 事件广播管理器，涉及到k8s里的一个核心资源 - Event事件，暂时不细讲
 	// Prepare the event broadcaster.
 	cc.EventBroadcaster.StartRecordingToSink(ctx.Done())
 
+	// 健康监测的服务
 	// Setup healthz checks.
 	var checks []healthz.HealthChecker
 	if cc.ComponentConfig.LeaderElection.LeaderElect {
@@ -190,9 +197,11 @@ func Run(ctx context.Context, cc *schedulerserverconfig.CompletedConfig, sched *
 	// Wait for all caches to sync before scheduling.
 	cc.InformerFactory.WaitForCacheSync(ctx.Done())
 
+	// 选举Leader的工作，因为Master节点可以存在多个，选举一个作为Leader
 	// If leader election is enabled, runCommand via LeaderElector until done and exit.
 	if cc.LeaderElection != nil {
 		cc.LeaderElection.Callbacks = leaderelection.LeaderCallbacks{
+			// 两个钩子函数，开启Leading时运行调度，结束时打印报错
 			OnStartedLeading: sched.Run,
 			OnStoppedLeading: func() {
 				klog.Fatalf("leaderelection lost")
@@ -203,15 +212,23 @@ func Run(ctx context.Context, cc *schedulerserverconfig.CompletedConfig, sched *
 			return fmt.Errorf("couldn't create leader elector: %v", err)
 		}
 
+		// 参与选举的会持续通信
 		leaderElector.Run(ctx)
 
 		return fmt.Errorf("lost lease")
 	}
 
+	// 不参与选举的，也就是单节点的情况时，在这里运行
 	// Leader election is disabled, so runCommand inline until done.
 	sched.Run(ctx)
 	return fmt.Errorf("finished without leader elect")
 }
+
+/*
+	到这里，我们已经接触了kube-scheduler的2个核心概念：
+	1. scheduler：正如程序名kube-scheduler，这个进程的核心作用是进行调度，会涉及到多种调度策略
+	2. Informer：k8s中有各种类型的资源，包括自定义的。而Informer的实现就将调度和资源结合了起来
+*/
 
 // buildHandlerChain wraps the given handler with the standard filters.
 func buildHandlerChain(handler http.Handler, authn authenticator.Request, authz authorizer.Authorizer) http.Handler {
@@ -312,6 +329,7 @@ func Setup(ctx context.Context, opts *options.Options, outOfTreeRegistryOptions 
 	}
 
 	recorderFactory := getRecorderFactory(&cc)
+	// 创建scheduler，包括多个选项
 	// Create the scheduler.
 	sched, err := scheduler.New(cc.Client,
 		cc.InformerFactory,

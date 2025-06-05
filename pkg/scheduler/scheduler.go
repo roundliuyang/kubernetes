@@ -181,6 +181,7 @@ var defaultSchedulerOptions = schedulerOptions{
 	podMaxBackoffSeconds:     int64(internalqueue.DefaultPodMaxBackoffDuration.Seconds()),
 }
 
+// 我们再看一下New这个函数
 // New returns a Scheduler
 func New(client clientset.Interface,
 	informerFactory informers.SharedInformerFactory,
@@ -200,6 +201,7 @@ func New(client clientset.Interface,
 
 	schedulerCache := internalcache.New(30*time.Second, stopEverything)
 
+	// 先注册了所有的算法，保存到一个 map[string]PluginFactory 中
 	registry := frameworkplugins.NewInTreeRegistry()
 	if err := registry.Merge(options.frameworkOutOfTreeRegistry); err != nil {
 		return nil, err
@@ -225,9 +227,11 @@ func New(client clientset.Interface,
 
 	metrics.Register()
 
+	// 重点看一下Scheduler的创建过程
 	var sched *Scheduler
 	source := options.schedulerAlgorithmSource
 	switch {
+	// 根据Provider创建，重点看这里
 	case source.Provider != nil:
 		// Create the config from a named algorithm provider.
 		sc, err := configurator.createFromProvider(*source.Provider)
@@ -235,6 +239,7 @@ func New(client clientset.Interface,
 			return nil, fmt.Errorf("couldn't create scheduler using provider %q: %v", *source.Provider, err)
 		}
 		sched = sc
+	// 根据用户设置创建，来自文件或者ConfigMap
 	case source.Policy != nil:
 		// Create the config from a user specified policy source.
 		policy := &schedulerapi.Policy{}
