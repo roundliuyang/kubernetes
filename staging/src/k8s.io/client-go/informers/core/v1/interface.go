@@ -22,6 +22,7 @@ import (
 	internalinterfaces "k8s.io/client-go/informers/internalinterfaces"
 )
 
+// v1.Interface 的定义
 // Interface provides access to all the informers in this group version.
 type Interface interface {
 	// ComponentStatuses returns a ComponentStatusInformer.
@@ -42,6 +43,7 @@ type Interface interface {
 	PersistentVolumes() PersistentVolumeInformer
 	// PersistentVolumeClaims returns a PersistentVolumeClaimInformer.
 	PersistentVolumeClaims() PersistentVolumeClaimInformer
+	// Pod的定义
 	// Pods returns a PodInformer.
 	Pods() PodInformer
 	// PodTemplates returns a PodTemplateInformer.

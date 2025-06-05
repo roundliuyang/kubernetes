@@ -32,6 +32,7 @@ import (
 	cache "k8s.io/client-go/tools/cache"
 )
 
+// PodInformer 是对应的接口
 // PodInformer provides access to a shared informer and lister for
 // Pods.
 type PodInformer interface {
@@ -39,6 +40,7 @@ type PodInformer interface {
 	Lister() v1.PodLister
 }
 
+// podInformer 是具体的实现
 type podInformer struct {
 	factory          internalinterfaces.SharedInformerFactory
 	tweakListOptions internalinterfaces.TweakListOptionsFunc
@@ -52,11 +54,13 @@ func NewPodInformer(client kubernetes.Interface, namespace string, resyncPeriod 
 	return NewFilteredPodInformer(client, namespace, resyncPeriod, indexers, nil)
 }
 
+// 实例化PodInformer，把对应的List/Watch操作方法传入到实例化函数，生成统一的SharedIndexInformer接口
 // NewFilteredPodInformer constructs a new informer for Pod type.
 // Always prefer using an informer factory to get a shared informer instead of getting an independent
 // one. This reduces memory footprint and number of connections to the server.
 func NewFilteredPodInformer(client kubernetes.Interface, namespace string, resyncPeriod time.Duration, indexers cache.Indexers, tweakListOptions internalinterfaces.TweakListOptionsFunc) cache.SharedIndexInformer {
 	return cache.NewSharedIndexInformer(
+		// List和Watch实现从PodInterface里面查询
 		&cache.ListWatch{
 			ListFunc: func(options metav1.ListOptions) (runtime.Object, error) {
 				if tweakListOptions != nil {
@@ -81,6 +85,7 @@ func (f *podInformer) defaultInformer(client kubernetes.Interface, resyncPeriod 
 	return NewFilteredPodInformer(client, f.namespace, resyncPeriod, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc}, f.tweakListOptions)
 }
 
+// 最后，我们可以看到podInformer调用了InformerFor函数进行了添加
 func (f *podInformer) Informer() cache.SharedIndexInformer {
 	return f.factory.InformerFor(&corev1.Pod{}, f.defaultInformer)
 }

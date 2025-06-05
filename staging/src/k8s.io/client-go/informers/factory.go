@@ -18,6 +18,14 @@ limitations under the License.
 
 package informers
 
+/*
+	client 是连接到 kube-apiserver 的客户端。
+	我们要理解k8s的设计：
+	1. etcd是核心的数据存储，对资源的修改会进行持久化
+	2. 只有kube-apiserver可以访问etcd
+	所以，kube-scheduler要了解资源的变化情况，只能通过kube-apiserver
+*/
+
 import (
 	reflect "reflect"
 	sync "sync"
@@ -52,6 +60,7 @@ import (
 // SharedInformerOption defines the functional option type for SharedInformerFactory.
 type SharedInformerOption func(*sharedInformerFactory) *sharedInformerFactory
 
+// 这里解答了为什么叫shared：一个资源会对应多个Informer，会导致效率低下，所以让一个资源对应一个sharedInformer，而一个sharedInformer内部自己维护多个Informer
 type sharedInformerFactory struct {
 	client           kubernetes.Interface
 	namespace        string
@@ -60,6 +69,7 @@ type sharedInformerFactory struct {
 	defaultResync    time.Duration
 	customResync     map[reflect.Type]time.Duration
 
+	// 这个map就是维护多个Informer的关键实现
 	informers map[reflect.Type]cache.SharedIndexInformer
 	// startedInformers is used for tracking which informers have been started.
 	// This allows Start() to be called multiple times safely.
@@ -124,6 +134,7 @@ func NewSharedInformerFactoryWithOptions(client kubernetes.Interface, defaultRes
 	return factory
 }
 
+// 运行函数
 // Start initializes all requested informers.
 func (f *sharedInformerFactory) Start(stopCh <-chan struct{}) {
 	f.lock.Lock()
@@ -131,7 +142,9 @@ func (f *sharedInformerFactory) Start(stopCh <-chan struct{}) {
 
 	for informerType, informer := range f.informers {
 		if !f.startedInformers[informerType] {
+			// goroutine异步处理
 			go informer.Run(stopCh)
+			// 标记为已经运行，这样即使下次Start也不会重复运行
 			f.startedInformers[informerType] = true
 		}
 	}
@@ -159,12 +172,14 @@ func (f *sharedInformerFactory) WaitForCacheSync(stopCh <-chan struct{}) map[ref
 	return res
 }
 
+// 查找对应的informer
 // InternalInformerFor returns the SharedIndexInformer for obj using an internal
 // client.
 func (f *sharedInformerFactory) InformerFor(obj runtime.Object, newFunc internalinterfaces.NewInformerFunc) cache.SharedIndexInformer {
 	f.lock.Lock()
 	defer f.lock.Unlock()
 
+	// 找到就直接返回
 	informerType := reflect.TypeOf(obj)
 	informer, exists := f.informers[informerType]
 	if exists {
@@ -176,12 +191,14 @@ func (f *sharedInformerFactory) InformerFor(obj runtime.Object, newFunc internal
 		resyncPeriod = f.defaultResync
 	}
 
+	// 没找到就会新建
 	informer = newFunc(f.client, resyncPeriod)
 	f.informers[informerType] = informer
 
 	return informer
 }
 
+// SharedInformerFactory 是 sharedInformerFactory 的接口定义
 // SharedInformerFactory provides shared informers for resources in all known
 // API group versions.
 type SharedInformerFactory interface {
@@ -195,6 +212,7 @@ type SharedInformerFactory interface {
 	Batch() batch.Interface
 	Certificates() certificates.Interface
 	Coordination() coordination.Interface
+	// 我们这一阶段关注的Pod的Informer，属于核心资源
 	Core() core.Interface
 	Discovery() discovery.Interface
 	Events() events.Interface
@@ -233,6 +251,7 @@ func (f *sharedInformerFactory) Coordination() coordination.Interface {
 	return coordination.New(f, f.namespace, f.tweakListOptions)
 }
 
+// core.Interface的定义
 func (f *sharedInformerFactory) Core() core.Interface {
 	return core.New(f, f.namespace, f.tweakListOptions)
 }

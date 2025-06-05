@@ -365,14 +365,17 @@ func (s *sharedIndexInformer) SetWatchErrorHandler(handler WatchErrorHandler) er
 	return nil
 }
 
+// 在上面，我们看到了异步运行Informer的代码 go informer.Run(stopCh)，我们看看是怎么run的
 func (s *sharedIndexInformer) Run(stopCh <-chan struct{}) {
 	defer utilruntime.HandleCrash()
 
+	// 这里有个 DeltaFIFO 的对象
 	fifo := NewDeltaFIFOWithOptions(DeltaFIFOOptions{
 		KnownObjects:          s.indexer,
 		EmitDeltaTypeReplaced: true,
 	})
 
+	// 传入这个fifo到cfg
 	cfg := &Config{
 		Queue:            fifo,
 		ListerWatcher:    s.listerWatcher,
@@ -385,6 +388,7 @@ func (s *sharedIndexInformer) Run(stopCh <-chan struct{}) {
 		WatchErrorHandler: s.watchErrorHandler,
 	}
 
+	// 新建controller
 	func() {
 		s.startedLock.Lock()
 		defer s.startedLock.Unlock()

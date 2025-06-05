@@ -206,6 +206,7 @@ var internalPackages = []string{"client-go/tools/cache/"}
 func (r *Reflector) Run(stopCh <-chan struct{}) {
 	klog.V(2).Infof("Starting reflector %s (%s) from %s", r.expectedTypeName, r.resyncPeriod, r.name)
 	wait.BackoffUntil(func() {
+		// 调用了ListAndWatch
 		if err := r.ListAndWatch(stopCh); err != nil {
 			r.watchErrorHandler(r, err)
 		}
@@ -448,12 +449,16 @@ func (r *Reflector) watchHandler(start time.Time, w watch.Interface, resourceVer
 
 loop:
 	for {
+		// 一个经典的GO语言select监听多channel的模式
 		select {
+		// 整体的step channel
 		case <-stopCh:
 			return errorStopRequested
+		// 错误相关的error channel
 		case err := <-errc:
 			return err
 		case event, ok := <-w.ResultChan():
+			// channel被关闭，退出loop
 			if !ok {
 				break loop
 			}
@@ -479,6 +484,7 @@ loop:
 			}
 			newResourceVersion := meta.GetResourceVersion()
 			switch event.Type {
+			// 增删改三种Event，分别对应到去store，即DeltaFIFO中，操作object
 			case watch.Added:
 				err := r.store.Add(event.Object)
 				if err != nil {

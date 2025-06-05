@@ -36,6 +36,8 @@ type PodsGetter interface {
 	Pods(namespace string) PodInterface
 }
 
+// 我们先看看Pod基本的List和Watch是怎么定义的
+// Pod基本的增删改查等操作
 // PodInterface has methods to work with Pod resources.
 type PodInterface interface {
 	Create(ctx context.Context, pod *v1.Pod, opts metav1.CreateOptions) (*v1.Pod, error)
@@ -53,6 +55,7 @@ type PodInterface interface {
 	PodExpansion
 }
 
+// pods 是PodInterface的实现
 // pods implements PodInterface
 type pods struct {
 	client rest.Interface
@@ -80,6 +83,7 @@ func (c *pods) Get(ctx context.Context, name string, options metav1.GetOptions) 
 	return
 }
 
+// List 和 Watch 是依赖客户端，也就是从kube-apiserver中查询的
 // List takes label and field selectors, and returns the list of Pods that match those selectors.
 func (c *pods) List(ctx context.Context, opts metav1.ListOptions) (result *v1.PodList, err error) {
 	var timeout time.Duration
