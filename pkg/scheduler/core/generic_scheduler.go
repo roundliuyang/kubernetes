@@ -132,6 +132,7 @@ func (g *genericScheduler) snapshot() error {
 	return g.cache.UpdateSnapshot(g.nodeInfoSnapshot)
 }
 
+// genericScheduler 的 Schedule 的实现
 // Schedule tries to schedule the given pod to one of the nodes in the node list.
 // If it succeeds, it will return the name of the node.
 // If it fails, it will return a FitError error with reasons.
@@ -139,27 +140,32 @@ func (g *genericScheduler) Schedule(ctx context.Context, prof *profile.Profile, 
 	trace := utiltrace.New("Scheduling", utiltrace.Field{Key: "namespace", Value: pod.Namespace}, utiltrace.Field{Key: "name", Value: pod.Name})
 	defer trace.LogIfLong(100 * time.Millisecond)
 
+	// 对 pod 进行 pvc 的信息检查
 	if err := podPassesBasicChecks(pod, g.pvcLister); err != nil {
 		return result, err
 	}
 	trace.Step("Basic checks done")
 
+	// 对当前的信息做一个快照
 	if err := g.snapshot(); err != nil {
 		return result, err
 	}
 	trace.Step("Snapshotting scheduler cache and node infos done")
 
+	// Node 节点数量为0，表示无可用节点
 	if g.nodeInfoSnapshot.NumNodes() == 0 {
 		return result, ErrNoNodesAvailable
 	}
 
 	startPredicateEvalTime := time.Now()
+	// Predict阶段：找到所有满足调度条件的节点feasibleNodes，不满足的就直接过滤
 	feasibleNodes, filteredNodesStatuses, err := g.findNodesThatFitPod(ctx, prof, state, pod)
 	if err != nil {
 		return result, err
 	}
 	trace.Step("Computing predicates done")
 
+	// 没有可用节点直接报错
 	if len(feasibleNodes) == 0 {
 		return result, &FitError{
 			Pod:                   pod,
@@ -172,6 +178,7 @@ func (g *genericScheduler) Schedule(ctx context.Context, prof *profile.Profile, 
 	metrics.DeprecatedSchedulingDuration.WithLabelValues(metrics.PredicateEvaluation).Observe(metrics.SinceInSeconds(startPredicateEvalTime))
 
 	startPriorityEvalTime := time.Now()
+	// 只有一个节点就直接选用
 	// When only one node after predicate, just use it.
 	if len(feasibleNodes) == 1 {
 		metrics.DeprecatedSchedulingAlgorithmPriorityEvaluationSecondsDuration.Observe(metrics.SinceInSeconds(startPriorityEvalTime))
@@ -182,6 +189,7 @@ func (g *genericScheduler) Schedule(ctx context.Context, prof *profile.Profile, 
 		}, nil
 	}
 
+	// Priority阶段：通过打分，找到一个分数最高、也就是最优的节点
 	priorityList, err := g.prioritizeNodes(ctx, prof, state, pod, feasibleNodes)
 	if err != nil {
 		return result, err
@@ -199,6 +207,11 @@ func (g *genericScheduler) Schedule(ctx context.Context, prof *profile.Profile, 
 		FeasibleNodes:  len(feasibleNodes),
 	}, err
 }
+
+/*
+	Predict 和 Priority 是选择调度节点的两个关键性步骤， 它的底层调用了各种algorithm算法。我们暂时不细看。
+	以我们前面讲到过的 NodeName 算法为例，节点必须与 NodeName 匹配，它是属于Predict阶段的。
+*/
 
 func (g *genericScheduler) Extenders() []framework.Extender {
 	return g.extenders

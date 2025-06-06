@@ -94,6 +94,8 @@ type SchedulingQueue interface {
 	Run()
 }
 
+// 再看看这个调度队列的初始化函数，从命名可以看到是一个优先队列，它的实现细节暂不细看
+// 结合实际情况思考下，pod会有重要程度的区分，所以调度的顺序需要考虑优先级的
 // NewSchedulingQueue initializes a priority queue as a new scheduling queue.
 func NewSchedulingQueue(lessFn framework.LessFunc, opts ...Option) SchedulingQueue {
 	return NewPriorityQueue(lessFn, opts...)
@@ -823,10 +825,12 @@ func NewSafePodNominator(podLister listersv1.PodLister) framework.PodNominator {
 	}
 }
 
+// 入队操作我们清楚了，那出队呢？我们回过头去看看上面定义的NextPod的方法实现
 // MakeNextPodFunc returns a function to retrieve the next pod from a given
 // scheduling queue
 func MakeNextPodFunc(queue SchedulingQueue) func() *framework.QueuedPodInfo {
 	return func() *framework.QueuedPodInfo {
+		// 从队列中弹出
 		podInfo, err := queue.Pop()
 		if err == nil {
 			klog.V(4).Infof("About to try and schedule pod %v/%v", podInfo.Pod.Namespace, podInfo.Pod.Name)

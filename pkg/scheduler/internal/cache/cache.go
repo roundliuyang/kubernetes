@@ -352,19 +352,25 @@ func (cache *schedulerCache) PodCount() (int, error) {
 	return count, nil
 }
 
+// 看看AssumePod做了什么
 func (cache *schedulerCache) AssumePod(pod *v1.Pod) error {
+	// 获取 pod 的 uid
 	key, err := framework.GetPodKey(pod)
 	if err != nil {
 		return err
 	}
 
+	// 加锁操作，保证并发情况下的一致性
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
+	// 根据 uid 找不到 pod 当前的状态
 	if _, ok := cache.podStates[key]; ok {
 		return fmt.Errorf("pod %v is in the cache, so can't be assumed", key)
 	}
 
+	// 把 Assume Pod 的信息放到对应 Node 节点中
 	cache.addPod(pod)
+	// 把 pod 状态设置为 Assume 成功
 	ps := &podState{
 		pod: pod,
 	}

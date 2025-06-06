@@ -167,9 +167,11 @@ func (sched *Scheduler) onCSINodeUpdate(oldObj, newObj interface{}) {
 	sched.SchedulingQueue.MoveAllToActiveOrBackoffQueue(queue.CSINodeUpdate)
 }
 
+// 牢记我们第一阶段要分析的对象：create nginx pod，所以进入这个add的操作，对应加入到队列
 func (sched *Scheduler) addPodToSchedulingQueue(obj interface{}) {
 	pod := obj.(*v1.Pod)
 	klog.V(3).Infof("add event for unscheduled pod %s/%s", pod.Namespace, pod.Name)
+	// 加入到队列
 	if err := sched.SchedulingQueue.Add(pod); err != nil {
 		utilruntime.HandleError(fmt.Errorf("unable to queue %T: %v", obj, err))
 	}
@@ -356,6 +358,7 @@ func (sched *Scheduler) skipPodUpdate(pod *v1.Pod) bool {
 	return true
 }
 
+// 在上面实例化Scheduler后，有个注册事件 Handler 的函数：addAllEventHandlers(sched, informerFactory, podInformer)
 // addAllEventHandlers is a helper function used in tests and in Scheduler
 // to add event handlers for various informers.
 func addAllEventHandlers(
@@ -365,6 +368,7 @@ func addAllEventHandlers(
 	// scheduled pod cache
 	informerFactory.Core().V1().Pods().Informer().AddEventHandler(
 		cache.FilteringResourceEventHandler{
+			// 定义过滤函数：必须为未调度的pod
 			FilterFunc: func(obj interface{}) bool {
 				switch t := obj.(type) {
 				case *v1.Pod:
@@ -380,6 +384,7 @@ func addAllEventHandlers(
 					return false
 				}
 			},
+			// 增改删三个操作对应的Handler，操作到对应的Queue
 			Handler: cache.ResourceEventHandlerFuncs{
 				AddFunc:    sched.addPodToCache,
 				UpdateFunc: sched.updatePodInCache,

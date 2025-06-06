@@ -56,6 +56,7 @@ const (
 	pluginMetricsSamplePercent = 10
 )
 
+// 在运行 kube-scheduler 的初期，我们创建了一个Scheduler的数据结构，回头再看看有什么和pod调度算法相关的
 // Scheduler watches for new unscheduled pods. It attempts to find
 // nodes that they fit on and writes bindings back to the api server.
 type Scheduler struct {
@@ -65,6 +66,7 @@ type Scheduler struct {
 
 	Algorithm core.ScheduleAlgorithm
 
+	// 获取下一个需要调度的Pod
 	// NextPod should be a function that blocks until the next pod
 	// is available. We don't use a channel for this, because scheduling
 	// a pod may take some amount of time and we don't want pods to get
@@ -78,6 +80,7 @@ type Scheduler struct {
 	// Close this to shut down the scheduler.
 	StopEverything <-chan struct{}
 
+	// 等待调度的Pod队列，我们重点看看这个队列是什么
 	// SchedulingQueue holds pods to be scheduled
 	SchedulingQueue internalqueue.SchedulingQueue
 
@@ -181,7 +184,7 @@ var defaultSchedulerOptions = schedulerOptions{
 	podMaxBackoffSeconds:     int64(internalqueue.DefaultPodMaxBackoffDuration.Seconds()),
 }
 
-// 我们再看一下New这个函数
+// Scheduler的实例化函数
 // New returns a Scheduler
 func New(client clientset.Interface,
 	informerFactory informers.SharedInformerFactory,
@@ -199,6 +202,7 @@ func New(client clientset.Interface,
 		opt(&options)
 	}
 
+	// 这里就是初始化的实例 schedulerCache
 	schedulerCache := internalcache.New(30*time.Second, stopEverything)
 
 	// 先注册了所有的算法，保存到一个 map[string]PluginFactory 中
@@ -231,7 +235,7 @@ func New(client clientset.Interface,
 	var sched *Scheduler
 	source := options.schedulerAlgorithmSource
 	switch {
-	// 根据Provider创建，重点看这里
+	// 从 Provider 创建
 	case source.Provider != nil:
 		// Create the config from a named algorithm provider.
 		sc, err := configurator.createFromProvider(*source.Provider)
@@ -239,7 +243,7 @@ func New(client clientset.Interface,
 			return nil, fmt.Errorf("couldn't create scheduler using provider %q: %v", *source.Provider, err)
 		}
 		sched = sc
-	// 根据用户设置创建，来自文件或者ConfigMap
+	// 从文件或者ConfigMap中创建
 	case source.Policy != nil:
 		// Create the config from a user specified policy source.
 		policy := &schedulerapi.Policy{}
@@ -309,9 +313,11 @@ func initPolicyFromConfigMap(client clientset.Interface, policyRef *schedulerapi
 	return nil
 }
 
+// 了解入队和出队操作后，我们看一下Scheduler运行的过程
 // Run begins watching and scheduling. It waits for cache to be synced, then starts scheduling and blocked until the context is done.
 func (sched *Scheduler) Run(ctx context.Context) {
 	sched.SchedulingQueue.Run()
+	// 调度一个pod对象
 	wait.UntilWithContext(ctx, sched.scheduleOne, 0)
 	sched.SchedulingQueue.Close()
 }
@@ -370,12 +376,14 @@ func updatePod(client clientset.Interface, pod *v1.Pod, condition *v1.PodConditi
 // assume signals to the cache that a pod is already in the cache, so that binding can be asynchronous.
 // assume modifies `assumed`.
 func (sched *Scheduler) assume(assumed *v1.Pod, host string) error {
+	// 将 host 填入到 pod spec字段的nodename，假定分配到对应的节点上
 	// Optimistically assume that the binding will succeed and send it to apiserver
 	// in the background.
 	// If the binding fails, scheduler will release resources allocated to assumed pod
 	// immediately.
 	assumed.Spec.NodeName = host
 
+	// 调用 SchedulerCache 下的 AssumePod
 	if err := sched.SchedulerCache.AssumePod(assumed); err != nil {
 		klog.Errorf("scheduler cache AssumePod failed: %v", err)
 		return err
@@ -393,14 +401,17 @@ func (sched *Scheduler) assume(assumed *v1.Pod, host string) error {
 // We expect this to run asynchronously, so we handle binding metrics internally.
 func (sched *Scheduler) bind(ctx context.Context, prof *profile.Profile, assumed *v1.Pod, targetNode string, state *framework.CycleState) (err error) {
 	start := time.Now()
+	// 把 assumed 的 pod 信息保存下来
 	defer func() {
 		sched.finishBinding(prof, assumed, targetNode, start, err)
 	}()
 
+	// 阶段1： 运行扩展绑定进行验证，如果已经绑定报错
 	bound, err := sched.extendersBinding(assumed, targetNode)
 	if bound {
 		return err
 	}
+	// 阶段2：运行绑定插件验证状态
 	bindStatus := prof.RunBindPlugins(ctx, state, assumed, targetNode)
 	if bindStatus.IsSuccess() {
 		return nil
@@ -441,12 +452,15 @@ func (sched *Scheduler) finishBinding(prof *profile.Profile, assumed *v1.Pod, ta
 
 // scheduleOne does the entire scheduling workflow for a single pod.  It is serialized on the scheduling algorithm's host fitting.
 func (sched *Scheduler) scheduleOne(ctx context.Context) {
+	// podInfo 就是从队列中获取到的pod对象
 	podInfo := sched.NextPod()
+	// 检查pod的有效性
 	// pod could be nil when schedulerQueue is closed
 	if podInfo == nil || podInfo.Pod == nil {
 		return
 	}
 	pod := podInfo.Pod
+	// 根据定义的 pod.Spec.SchedulerName 查到对应的profile
 	prof, err := sched.profileForPod(pod)
 	if err != nil {
 		// This shouldn't happen, because we only accept for scheduling the pods
@@ -454,6 +468,7 @@ func (sched *Scheduler) scheduleOne(ctx context.Context) {
 		klog.Error(err)
 		return
 	}
+	// 可以跳过调度的情况，一般pod进不来
 	if sched.skipPodSchedule(prof, pod) {
 		return
 	}
@@ -466,8 +481,14 @@ func (sched *Scheduler) scheduleOne(ctx context.Context) {
 	state.SetRecordPluginMetrics(rand.Intn(100) < pluginMetricsSamplePercent)
 	schedulingCycleCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	// 调用调度算法，获取结果
 	scheduleResult, err := sched.Algorithm.Schedule(schedulingCycleCtx, prof, state, pod)
 	if err != nil {
+		/*
+			出现调度失败的情况：
+			这个时候可能会触发抢占preempt，抢占是一套复杂的逻辑，后面我们专门会讲
+			目前假设各类资源充足，能正常调度
+		*/
 		// Schedule() may have failed because the pod would not fit on any host, so we try to
 		// preempt, with the expectation that the next time the pod is tried for scheduling it
 		// will fit due to the preemption. It is also possible that a different pod will schedule
@@ -503,13 +524,16 @@ func (sched *Scheduler) scheduleOne(ctx context.Context) {
 		return
 	}
 	metrics.SchedulingAlgorithmLatency.Observe(metrics.SinceInSeconds(start))
+	// assumePod 是假设这个Pod按照前面的调度算法分配后，进行验证
 	// Tell the cache to assume that a pod now is running on a given node, even though it hasn't been bound yet.
 	// This allows us to keep scheduling without waiting on binding to occur.
 	assumedPodInfo := podInfo.DeepCopy()
 	assumedPod := assumedPodInfo.Pod
+	// SuggestedHost 为建议的分配的Host
 	// assume modifies `assumedPod` by setting NodeName=scheduleResult.SuggestedHost
 	err = sched.assume(assumedPod, scheduleResult.SuggestedHost)
 	if err != nil {
+		// 失败就重新分配，不考虑这种情况
 		metrics.PodScheduleError(prof.Name, metrics.SinceInSeconds(start))
 		// This is most probably result of a BUG in retrying logic.
 		// We report an error here so that pod scheduling can be retried.
@@ -520,6 +544,7 @@ func (sched *Scheduler) scheduleOne(ctx context.Context) {
 		return
 	}
 
+	// 运行相关插件的代码先跳过
 	// Run the Reserve method of reserve plugins.
 	if sts := prof.RunReservePluginsReserve(schedulingCycleCtx, state, assumedPod, scheduleResult.SuggestedHost); !sts.IsSuccess() {
 		metrics.PodScheduleError(prof.Name, metrics.SinceInSeconds(start))
@@ -552,6 +577,7 @@ func (sched *Scheduler) scheduleOne(ctx context.Context) {
 		return
 	}
 
+	// 异步绑定pod
 	// bind the pod to its host asynchronously (we can do this b/c of the assumption step above).
 	go func() {
 		bindingCycleCtx, cancel := context.WithCancel(ctx)
@@ -591,6 +617,7 @@ func (sched *Scheduler) scheduleOne(ctx context.Context) {
 			return
 		}
 
+		// 真正做绑定的动作
 		err := sched.bind(bindingCycleCtx, prof, assumedPod, scheduleResult.SuggestedHost, state)
 		if err != nil {
 			metrics.PodScheduleError(prof.Name, metrics.SinceInSeconds(start))
@@ -605,10 +632,12 @@ func (sched *Scheduler) scheduleOne(ctx context.Context) {
 			if klog.V(2).Enabled() {
 				klog.InfoS("Successfully bound pod to node", "pod", klog.KObj(pod), "node", scheduleResult.SuggestedHost, "evaluatedNodes", scheduleResult.EvaluatedNodes, "feasibleNodes", scheduleResult.FeasibleNodes)
 			}
+			// metrics中记录相关的监控指标
 			metrics.PodScheduled(prof.Name, metrics.SinceInSeconds(start))
 			metrics.PodSchedulingAttempts.Observe(float64(podInfo.Attempts))
 			metrics.PodSchedulingDuration.WithLabelValues(getAttemptsLabel(podInfo)).Observe(metrics.SinceInSeconds(podInfo.InitialAttemptTimestamp))
 
+			// 运行绑定后的插件
 			// Run "postbind" plugins.
 			prof.RunPostBindPlugins(bindingCycleCtx, state, assumedPod, scheduleResult.SuggestedHost)
 		}

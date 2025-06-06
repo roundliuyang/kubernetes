@@ -107,6 +107,7 @@ func (c *Configurator) buildFramework(p schedulerapi.KubeSchedulerProfile, opts 
 	)
 }
 
+// 回头去找 SchedulerCache 初始化的地方
 // create a scheduler from a set of registered plugins.
 func (c *Configurator) create() (*Scheduler, error) {
 	var extenders []framework.Extender
@@ -164,6 +165,7 @@ func (c *Configurator) create() (*Scheduler, error) {
 	}
 	// Profiles are required to have equivalent queue sort plugins.
 	lessFn := profiles[c.profiles[0].SchedulerName].Framework.QueueSortFunc()
+	// 实例化 podQueue
 	podQueue := internalqueue.NewSchedulingQueue(
 		lessFn,
 		internalqueue.WithPodInitialBackoffDuration(time.Duration(c.podInitialBackoffSeconds)*time.Second),
@@ -190,17 +192,19 @@ func (c *Configurator) create() (*Scheduler, error) {
 	)
 
 	return &Scheduler{
-		SchedulerCache:  c.schedulerCache,
-		Algorithm:       algo,
-		Profiles:        profiles,
-		NextPod:         internalqueue.MakeNextPodFunc(podQueue),
-		Error:           MakeDefaultErrorFunc(c.client, c.informerFactory.Core().V1().Pods().Lister(), podQueue, c.schedulerCache),
-		StopEverything:  c.StopEverything,
+		SchedulerCache: c.schedulerCache,
+		Algorithm:      algo,
+		Profiles:       profiles,
+		// NextPod 函数依赖于 podQueue
+		NextPod:        internalqueue.MakeNextPodFunc(podQueue),
+		Error:          MakeDefaultErrorFunc(c.client, c.informerFactory.Core().V1().Pods().Lister(), podQueue, c.schedulerCache),
+		StopEverything: c.StopEverything,
+		// 调度队列被赋值为podQueue
 		SchedulingQueue: podQueue,
 	}, nil
 }
 
-// 创建
+// 两个创建方式，底层都是调用的 create 函数
 // createFromProvider creates a scheduler from the name of a registered algorithm provider.
 func (c *Configurator) createFromProvider(providerName string) (*Scheduler, error) {
 	klog.V(2).Infof("Creating scheduler from algorithm provider '%v'", providerName)
