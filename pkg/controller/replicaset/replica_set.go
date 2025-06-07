@@ -124,6 +124,7 @@ func NewReplicaSetController(rsInformer appsinformers.ReplicaSetInformer, podInf
 	)
 }
 
+// 再回过头，去查看syncHandler的具体实现
 // NewBaseController is the implementation of NewReplicaSetController with additional injected
 // parameters so that it can also serve as the implementation of NewReplicationController.
 func NewBaseController(rsInformer appsinformers.ReplicaSetInformer, podInformer coreinformers.PodInformer, kubeClient clientset.Interface, burstReplicas int,
@@ -173,6 +174,7 @@ func (rsc *ReplicaSetController) SetEventRecorder(recorder record.EventRecorder)
 	rsc.podControl = controller.RealPodControl{KubeClient: rsc.kubeClient, Recorder: recorder}
 }
 
+// 运行函数
 // Run begins watching and syncing.
 func (rsc *ReplicaSetController) Run(workers int, stopCh <-chan struct{}) {
 	defer utilruntime.HandleCrash()
@@ -512,17 +514,23 @@ func (rsc *ReplicaSetController) deletePod(obj interface{}) {
 // worker runs a worker thread that just dequeues items, processes them, and marks them done.
 // It enforces that the syncHandler is never invoked concurrently with the same key.
 func (rsc *ReplicaSetController) worker() {
+	// 继续查找实现
 	for rsc.processNextWorkItem() {
 	}
 }
 
 func (rsc *ReplicaSetController) processNextWorkItem() bool {
+	// 这里也有个queue的概念，可以类比kube-scheduler中的实现
+	// 不同的是，这里的queue是 workqueue.RateLimitingInterface ，也就是限制速率的，具体实现今天不细看
+
+	// 获取元素
 	key, quit := rsc.queue.Get()
 	if quit {
 		return false
 	}
 	defer rsc.queue.Done(key)
 
+	// 处理对应的元素
 	err := rsc.syncHandler(key.(string))
 	if err == nil {
 		rsc.queue.Forget(key)
@@ -535,16 +543,19 @@ func (rsc *ReplicaSetController) processNextWorkItem() bool {
 	return true
 }
 
+// 我们再一起看看，当Pod数量和ReplicaSet中声明的不同时，是怎么工作的
 // manageReplicas checks and updates replicas for the given ReplicaSet.
 // Does NOT modify <filteredPods>.
 // It will requeue the replica set in case of an error while creating/deleting pods.
 func (rsc *ReplicaSetController) manageReplicas(filteredPods []*v1.Pod, rs *apps.ReplicaSet) error {
+	// diff = 当前pod数 - 期望pod数
 	diff := len(filteredPods) - int(*(rs.Spec.Replicas))
 	rsKey, err := controller.KeyFunc(rs)
 	if err != nil {
 		utilruntime.HandleError(fmt.Errorf("couldn't get key for %v %#v: %v", rsc.Kind, rs, err))
 		return nil
 	}
+	// diff小于0，表示需要扩容，即新增Pod
 	if diff < 0 {
 		diff *= -1
 		if diff > rsc.burstReplicas {
@@ -588,7 +599,7 @@ func (rsc *ReplicaSetController) manageReplicas(filteredPods []*v1.Pod, rs *apps
 			}
 		}
 		return err
-	} else if diff > 0 {
+	} else if diff > 0 { // diff 大于0，即需要缩容
 		if diff > rsc.burstReplicas {
 			diff = rsc.burstReplicas
 		}
@@ -649,6 +660,7 @@ func (rsc *ReplicaSetController) syncReplicaSet(key string) error {
 		klog.V(4).Infof("Finished syncing %v %q (%v)", rsc.Kind, key, time.Since(startTime))
 	}()
 
+	// 从key中拆分出 namespace 和 name
 	namespace, name, err := cache.SplitMetaNamespaceKey(key)
 	if err != nil {
 		return err
@@ -663,13 +675,16 @@ func (rsc *ReplicaSetController) syncReplicaSet(key string) error {
 		return err
 	}
 
+	// 根据name，从 Lister 获取对应的 ReplicaSets 信息
 	rsNeedsSync := rsc.expectations.SatisfiedExpectations(key)
+	// 获取 selector (k8s 是根据selector中的label来匹配 ReplicaSets 和 Pod 的)
 	selector, err := metav1.LabelSelectorAsSelector(rs.Spec.Selector)
 	if err != nil {
 		utilruntime.HandleError(fmt.Errorf("error converting pod selector to selector: %v", err))
 		return nil
 	}
 
+	// 根据namespace和labels获取所有的pod
 	// list all pods to include the pods that don't match the rs`s selector
 	// anymore but has the stale controller ref.
 	// TODO: Do the List and Filter in a single pass, or use an index.
@@ -677,9 +692,11 @@ func (rsc *ReplicaSetController) syncReplicaSet(key string) error {
 	if err != nil {
 		return err
 	}
+	// 过滤无效的pod
 	// Ignore inactive pods.
 	filteredPods := controller.FilterActivePods(allPods)
 
+	// 根据selector再过滤pod
 	// NOTE: filteredPods are pointing to objects from cache - if you need to
 	// modify them, you need to copy it first.
 	filteredPods, err = rsc.claimPods(rs, selector, filteredPods)
@@ -689,11 +706,13 @@ func (rsc *ReplicaSetController) syncReplicaSet(key string) error {
 
 	var manageReplicasErr error
 	if rsNeedsSync && rs.DeletionTimestamp == nil {
+		// 管理 ReplicaSet，下面详细分析
 		manageReplicasErr = rsc.manageReplicas(filteredPods, rs)
 	}
 	rs = rs.DeepCopy()
 	newStatus := calculateStatus(rs, filteredPods, manageReplicasErr)
 
+	// 更新状态
 	// Always updates status as pods come up or die.
 	updatedRS, err := updateReplicaSetStatus(rsc.kubeClient.AppsV1().ReplicaSets(rs.Namespace), rs, newStatus)
 	if err != nil {
