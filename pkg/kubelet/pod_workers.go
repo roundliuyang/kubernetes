@@ -160,6 +160,7 @@ func (p *podWorkers) managePodLoop(podUpdates <-chan UpdatePodOptions) {
 	for update := range podUpdates {
 		err := func() error {
 			podUID := update.Pod.UID
+			// 同步pod的函数
 			// This is a blocking call that would return only if the cache
 			// has an entry for the pod that is newer than minRuntimeCache
 			// Time. This ensures the worker doesn't start syncing until
@@ -194,6 +195,7 @@ func (p *podWorkers) managePodLoop(podUpdates <-chan UpdatePodOptions) {
 	}
 }
 
+// 查到初始化的地方
 // Apply the new setting to the specified pod.
 // If the options provide an OnCompleteFunc, the function is invoked if the update is accepted.
 // Update requests are ignored if a kill pod request is pending.
@@ -205,6 +207,7 @@ func (p *podWorkers) UpdatePod(options *UpdatePodOptions) {
 
 	p.podLock.Lock()
 	defer p.podLock.Unlock()
+	// 当pod不存在时，满足示例，是新建的pod
 	if podUpdates, exists = p.podUpdates[uid]; !exists {
 		// We need to have a buffer here, because checkForUpdates() method that
 		// puts an update into channel is called from the same goroutine where
@@ -213,6 +216,7 @@ func (p *podWorkers) UpdatePod(options *UpdatePodOptions) {
 		podUpdates = make(chan UpdatePodOptions, 1)
 		p.podUpdates[uid] = podUpdates
 
+		// 并发处理
 		// Creating a new pod worker either means this is a new pod, or that the
 		// kubelet just restarted. In either case the kubelet is willing to believe
 		// the status of the pod for the first pod worker sync. See corresponding
