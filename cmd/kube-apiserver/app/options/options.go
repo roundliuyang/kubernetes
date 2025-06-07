@@ -95,14 +95,15 @@ func NewServerRunOptions() *ServerRunOptions {
 		InsecureServing:         kubeoptions.NewInsecureServingOptions(),
 		Audit:                   genericoptions.NewAuditOptions(),
 		Features:                genericoptions.NewFeatureOptions(),
-		Admission:               kubeoptions.NewAdmissionOptions(), // admission选项
-		Authentication:          kubeoptions.NewBuiltInAuthenticationOptions().WithAll(),
-		Authorization:           kubeoptions.NewBuiltInAuthorizationOptions(),
-		CloudProvider:           kubeoptions.NewCloudProviderOptions(),
-		APIEnablement:           genericoptions.NewAPIEnablementOptions(),
-		EgressSelector:          genericoptions.NewEgressSelectorOptions(),
-		Metrics:                 metrics.NewOptions(),
-		Logs:                    logs.NewOptions(),
+		// admission选项
+		Admission:      kubeoptions.NewAdmissionOptions(),
+		Authentication: kubeoptions.NewBuiltInAuthenticationOptions().WithAll(),
+		Authorization:  kubeoptions.NewBuiltInAuthorizationOptions(),
+		CloudProvider:  kubeoptions.NewCloudProviderOptions(),
+		APIEnablement:  genericoptions.NewAPIEnablementOptions(),
+		EgressSelector: genericoptions.NewEgressSelectorOptions(),
+		Metrics:        metrics.NewOptions(),
+		Logs:           logs.NewOptions(),
 
 		EnableLogsHandler:      true,
 		EventTTL:               1 * time.Hour,

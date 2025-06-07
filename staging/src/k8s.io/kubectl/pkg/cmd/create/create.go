@@ -96,12 +96,18 @@ func NewCreateOptions(ioStreams genericclioptions.IOStreams) *CreateOptions {
 	}
 }
 
+/*
+	这段代码定义了 kubectl create 子命令的实现逻辑，是整个 kubectl 命令行工具的一部分。
+	创建并初始化 kubectl create 命令及其子命令（如 create deployment、create secret 等），并配置其参数、校验、执行逻辑。
+*/
 // NewCmdCreate returns new initialized instance of create sub command
 func NewCmdCreate(f cmdutil.Factory, ioStreams genericclioptions.IOStreams) *cobra.Command {
-	// create子命令的相关选项
+	// 初始化命令的选项对象 o，用于保存命令行参数，比如 -f、--selector 等
 	o := NewCreateOptions(ioStreams)
 
-	// create子命令的相关说明
+	// 创建 cobra.Command
+	// 定义 create 命令的用法（Usage）、简要描述（Short）、完整说明（Long）和示例（Example）。
+	// 最重要的是 Run 字段，它定义了用户执行 kubectl create ... 时的主逻辑。
 	cmd := &cobra.Command{
 		Use:                   "create -f FILENAME",
 		DisableFlagsInUseLine: true,
@@ -110,13 +116,16 @@ func NewCmdCreate(f cmdutil.Factory, ioStreams genericclioptions.IOStreams) *cob
 		Example:               createExample,
 		// 验证参数并运行
 		Run: func(cmd *cobra.Command, args []string) {
+			// 如果用户没有指定 -f 或 -k 参数，就打印错误并提示用法。
 			if cmdutil.IsFilenameSliceEmpty(o.FilenameOptions.Filenames, o.FilenameOptions.Kustomize) {
 				ioStreams.ErrOut.Write([]byte("Error: must specify one of -f and -k\n\n"))
 				defaultRunFunc := cmdutil.DefaultSubCommandRun(ioStreams.ErrOut)
 				defaultRunFunc(cmd, args)
 				return
 			}
+			// 补全选项，比如解析文件名
 			cmdutil.CheckErr(o.Complete(f, cmd))
+			// 参数校验
 			cmdutil.CheckErr(o.ValidateArgs(cmd, args))
 			// 核心的运行代码逻辑是在这里的RunCreate
 			cmdutil.CheckErr(o.RunCreate(f, cmd))
@@ -127,7 +136,13 @@ func NewCmdCreate(f cmdutil.Factory, ioStreams genericclioptions.IOStreams) *cob
 	o.RecordFlags.AddFlags(cmd)
 
 	usage := "to use to create the resource"
-	// 加入文件名选项的flag -f，保存到o.FilenameOptions.Filenames中，对应上面
+	// 这里注册各种支持的参数（flags）：
+	// -f：指定 YAML 文件
+	// --edit：创建前是否允许编辑资源
+	// --selector：通过 label 过滤
+	// --raw：指定要 POST 的原始 URI
+	// --dry-run：是否只模拟不执行
+	// --field-manager：用于 Server-Side Apply 的标识
 	cmdutil.AddFilenameOptionFlags(cmd, &o.FilenameOptions, usage)
 	cmdutil.AddValidateFlags(cmd)
 	cmd.Flags().BoolVar(&o.EditBeforeCreate, "edit", o.EditBeforeCreate, "Edit the API resource before creating")
@@ -141,7 +156,12 @@ func NewCmdCreate(f cmdutil.Factory, ioStreams genericclioptions.IOStreams) *cob
 
 	o.PrintFlags.AddFlags(cmd)
 
-	// create的子命令，指定create对象
+	// 这一步将所有 create 子命令挂载上来，例如：
+	// kubectl create namespace
+	// kubectl create deployment
+	// kubectl create secret
+	// ...
+	// 每一个都是一个独立的 *cobra.Command 对象
 	// create subcommands
 	cmd.AddCommand(NewCmdCreateNamespace(f, ioStreams))
 	cmd.AddCommand(NewCmdCreateQuota(f, ioStreams))
@@ -229,8 +249,10 @@ func (o *CreateOptions) Complete(f cmdutil.Factory, cmd *cobra.Command) error {
 	return nil
 }
 
+// RunCreate() 是 kubectl create 真正和 kube-apiserver 通信的代码，它会解析文件中的资源清单，逐个通过 REST API 发送 POST 请求创建对象，并支持 raw/http、dry-run、edit 模式。
 // RunCreate performs the creation
 func (o *CreateOptions) RunCreate(f cmdutil.Factory, cmd *cobra.Command) error {
+	// 如果用户使用 --raw 参数（低级 HTTP 方式创建资源），就直接发 HTTP 请求，不走常规资源创建流程
 	// raw only makes sense for a single file resource multiple objects aren't likely to do what you want.
 	// the validator enforces this, so
 	if len(o.Raw) > 0 {
@@ -241,22 +263,28 @@ func (o *CreateOptions) RunCreate(f cmdutil.Factory, cmd *cobra.Command) error {
 		return rawhttp.RawPost(restClient, o.IOStreams, o.Raw, o.FilenameOptions.Filenames[0])
 	}
 
+	// 如果开启 --edit，在真正创建前会打开一个编辑器让你先编辑一下资源内容
 	if o.EditBeforeCreate {
 		return RunEditOnCreate(f, o.PrintFlags, o.RecordFlags, o.IOStreams, cmd, &o.FilenameOptions, o.fieldManager)
 	}
-	// f为传入的Factory，主要是封装了与kube-apiserver交互客户端
+	// 获取 schema 验证器用于校验资源格式
 	schema, err := f.Validator(cmdutil.GetFlagBool(cmd, "validate"))
 	if err != nil {
 		return err
 	}
 
+	// 获取当前 kubeconfig 中的命名空间，用于确定资源要创建在哪个 namespace 中
 	cmdNamespace, enforceNamespace, err := f.ToRawKubeConfigLoader().Namespace()
 	if err != nil {
 		return err
 	}
 
-	// 实例化Builder，这块的逻辑比较复杂，我们先关注文件部分
+	// 使用 Builder 构建资源对象集合，它做的事包括：
+	// • 解析你提供的文件 -f xxx.yaml（也支持 URL 或 stdin）；
+	// • 将这些内容转换成 Kubernetes 的 资源对象集合（可以是多个）；
+	// • 构建一个 Result，你可以用 Visit 遍历每个资源对象。
 	r := f.NewBuilder().
+		// 我们可以在Unstructured()中看到getClient函数，与kube-apiserver交互的Client在这个函数中被创建
 		Unstructured().
 		Schema(schema).
 		ContinueOnError().
@@ -272,7 +300,12 @@ func (o *CreateOptions) RunCreate(f cmdutil.Factory, cmd *cobra.Command) error {
 	}
 
 	count := 0
-	// 调用visit函数，创建资源
+
+	//  遍历每个资源对象，逐一创建
+	// • 遍历上一步构造出的资源对象；
+	// • 为每个对象调用 Create(...) 发起 REST 请求；
+	// • 创建成功后可以 info.Refresh() 读取创建返回的最新对象；
+	// • 如果有设置 --dry-run，就只模拟发送，不会真正创建；
 	err = r.Visit(func(info *resource.Info, err error) error {
 		if err != nil {
 			return err
@@ -291,6 +324,7 @@ func (o *CreateOptions) RunCreate(f cmdutil.Factory, cmd *cobra.Command) error {
 					return cmdutil.AddSourceToErr("creating", info.Source, err)
 				}
 			}
+			// 关键的发送函数
 			obj, err := resource.
 				NewHelper(info.Client, info.Mapping).
 				DryRun(o.DryRunStrategy == cmdutil.DryRunServer).
@@ -304,6 +338,7 @@ func (o *CreateOptions) RunCreate(f cmdutil.Factory, cmd *cobra.Command) error {
 
 		count++
 
+		// 打印每个创建成功的对象信息；
 		return o.PrintObj(info.Object)
 	})
 	if err != nil {

@@ -175,7 +175,9 @@ func (m *Helper) createResource(c RESTClient, resource, namespace string, obj ru
 		Resource(resource).
 		VersionedParams(options, metav1.ParameterCodec).
 		Body(obj).
+		// Do方法，发送请求
 		Do(context.TODO()).
+		// Get方法，获取请求的返回结果，用来打印状态
 		Get()
 }
 func (m *Helper) Patch(namespace, name string, pt types.PatchType, data []byte, options *metav1.PatchOptions) (runtime.Object, error) {

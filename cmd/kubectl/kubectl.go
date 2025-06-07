@@ -37,7 +37,7 @@ func main() {
 	// Seed即随机的种子，每次用时间戳作为种子，就能保证随机性
 	rand.Seed(time.Now().UnixNano())
 
-	// 创建了kubectl命令的默认参数
+	// 创建一个默认配置的 kubectl 命令对象
 	command := cmd.NewDefaultKubectlCommand()
 
 	// TODO: once we switch everything over to Cobra commands, we can go back to calling

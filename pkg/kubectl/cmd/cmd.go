@@ -304,23 +304,38 @@ func NewDefaultKubectlCommand() *cobra.Command {
 	return NewDefaultKubectlCommandWithArgs(NewDefaultPluginHandler(plugin.ValidPluginFilenamePrefixes), os.Args, os.Stdin, os.Stdout, os.Stderr)
 }
 
+/*
+	这个函数完成了两个主要工作：
+	构建标准的 kubectl 命令结构（使用 cobra）。
+	在找不到原生命令时，尝试作为插件命令处理（比如执行 kubectl-myplugin）。
+
+	举个例子：
+	用户在终端输入：
+	kubectl foo do-something
+	• foo 不是内置命令。
+	• 于是 cmd.Find 找不到。
+	• 然后就尝试调用插件命令 kubectl-foo 可执行文件，并把参数 do-something 传进去。
+
+*/
 // NewDefaultKubectlCommandWithArgs creates the `kubectl` command with arguments
 func NewDefaultKubectlCommandWithArgs(pluginHandler PluginHandler, args []string, in io.Reader, out, errout io.Writer) *cobra.Command {
 	// 初始化NewKubectlCommand，采用标准输入、输出、错误输出
 	cmd := NewKubectlCommand(in, out, errout)
 
+	// 如果没有传插件处理器，那就说明不支持插件扩展功能，直接返回基本命令即可
 	if pluginHandler == nil {
 		return cmd
 	}
 
 	if len(args) > 1 {
-		// 这里为传入的参数，即 create -f nginx_pod.yaml 部分
+		// 这里 cmdPathPieces 是命令部分，不包括 "kubectl"，比如：, create -f nginx.yaml → []string{"create", "-f", "nginx.yaml"}
 		cmdPathPieces := args[1:]
 
-		// 调用cobra的Find去匹配args
+		// 使用 cobra.Command.Find 查找命令路径是否在内置命令中存在,
 		// only look for suitable extension executables if
 		// the specified command does not already exist
 		if _, _, err := cmd.Find(cmdPathPieces); err != nil {
+			// 处理插件命令
 			if err := HandlePluginCommand(pluginHandler, cmdPathPieces); err != nil {
 				fmt.Fprintf(errout, "%v\n", err)
 				os.Exit(1)

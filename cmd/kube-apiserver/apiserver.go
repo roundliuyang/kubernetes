@@ -33,6 +33,7 @@ func main() {
 	rand.Seed(time.Now().UnixNano())
 
 	// 启动命令
+	// 们从可以从kube-apiserver启动过程，逐步找到Admission被初始化的地方
 	command := app.NewAPIServerCommand()
 
 	// TODO: once we switch everything over to Cobra commands, we can go back to calling
