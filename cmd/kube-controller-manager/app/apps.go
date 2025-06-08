@@ -65,17 +65,31 @@ func startStatefulSetController(ctx ControllerContext) (http.Handler, bool, erro
 	return nil, true, nil
 }
 
+/*
+	启动 Kubernetes 的 ReplicaSet 控制器，用于确保实际运行的 Pod 数量与 ReplicaSet 中声明的副本数一致。
+	它是 kube-controller-manager 启动控制器流程中的一环，由 StartControllers 调用
+	控制器核心职责
+	• 每当 ReplicaSet 或 Pod 状态发生变化时，控制器会响应：
+		• ReplicaSet 更新： 如果 .spec.replicas 有变化 → 创建或删除 Pod
+		• Pod 状态变化： 比如被杀掉或意外挂掉 → 尝试补充新 Pod
+*/
 func startReplicaSetController(ctx ControllerContext) (http.Handler, bool, error) {
+	// 检查是否支持 ReplicaSet 资源（防止 API Server 不支持），如果不支持，控制器不启动，返回 false
 	if !ctx.AvailableResources[schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "replicasets"}] {
 		return nil, false, nil
 	}
-	// 用goroutine异步运行，包含了 ReplicaSet和Pod 的两个Informer
-	// 这一点很好理解：我们是要控制ReplicaSet声明的数量和运行的Pod数量一致，需要同时观察者两种资源
+	// 启动 ReplicaSet 控制器
+	// 核心逻辑：
+	// • 使用两个 Informer：
+	//     • ReplicaSet informer：监控期望状态
+	//     • Pod informer：监控实际状态
+	// • Run() 内部启动多个 goroutine（由 ConcurrentRSSyncs 决定并发度）
+	// • 控制器监听变更事件、维护队列、执行 reconcile 操作
 	go replicaset.NewReplicaSetController(
-		ctx.InformerFactory.Apps().V1().ReplicaSets(),
-		ctx.InformerFactory.Core().V1().Pods(),
-		ctx.ClientBuilder.ClientOrDie("replicaset-controller"),
-		replicaset.BurstReplicas,
+		ctx.InformerFactory.Apps().V1().ReplicaSets(),          // 监听 ReplicaSet
+		ctx.InformerFactory.Core().V1().Pods(),                 // 监听 Pod（必须，控制器需知道实际 Pod 状态）
+		ctx.ClientBuilder.ClientOrDie("replicaset-controller"), // 构造用于访问 API Server 的 client
+		replicaset.BurstReplicas,                               // 每次调整副本数时最多 burst 创建多少个 Pod（用于限制）
 	).Run(int(ctx.ComponentConfig.ReplicaSetController.ConcurrentRSSyncs), ctx.Stop)
 	return nil, true, nil
 }

@@ -174,7 +174,7 @@ func (rsc *ReplicaSetController) SetEventRecorder(recorder record.EventRecorder)
 	rsc.podControl = controller.RealPodControl{KubeClient: rsc.kubeClient, Recorder: recorder}
 }
 
-// 运行函数
+// 监听资源同步状态，启动并发 worker，不断从工作队列中取出任务，通过 informer 本地缓存对 ReplicaSet 状态做调谐（reconcile），实现副本数的一致性控制
 // Run begins watching and syncing.
 func (rsc *ReplicaSetController) Run(workers int, stopCh <-chan struct{}) {
 	defer utilruntime.HandleCrash()
@@ -188,6 +188,12 @@ func (rsc *ReplicaSetController) Run(workers int, stopCh <-chan struct{}) {
 		return
 	}
 
+	// 启动多个 worker 协程（数量由 workers 参数指定），每个 worker 每秒运行一次 rsc.worker() 方法，内部会从队列中取出任务进行处理（就是所谓的“reconcile loop”）
+	// 每个 worker 会调用 rsc.worker()，再内部调用 rsc.syncHandler(key)：
+	// • 从 rsc.queue 中取出一个 key（通常是 ReplicaSet 的名字）
+	// • 找到对应的 ReplicaSet 和其关联的 Pod 列表
+	// • 比较期望副本数和实际 Pod 数量
+	// • 做出增删 Pod 的行为（增删的是实际 Pod，而不是修改 ReplicaSet）
 	for i := 0; i < workers; i++ {
 		go wait.Until(rsc.worker, time.Second, stopCh)
 	}
@@ -519,6 +525,18 @@ func (rsc *ReplicaSetController) worker() {
 	}
 }
 
+/*
+Run
+└── StartControllers
+    └── startReplicaSetController
+        └── replicaset.NewReplicaSetController(...).Run
+            └── ReplicaSetController.Run
+                └── ReplicaSetController.worker
+                    └── ReplicaSetController.processNextWorkItem
+                        └── ReplicaSetController.syncHandler (绑定的是 syncReplicaSet)
+                            └── ReplicaSetController.syncReplicaSet
+                                └── ReplicaSetController.manageReplicas
+*/
 func (rsc *ReplicaSetController) processNextWorkItem() bool {
 	// 这里也有个queue的概念，可以类比kube-scheduler中的实现
 	// 不同的是，这里的queue是 workqueue.RateLimitingInterface ，也就是限制速率的，具体实现今天不细看

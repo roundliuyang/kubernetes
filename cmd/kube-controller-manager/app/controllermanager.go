@@ -168,6 +168,35 @@ func ResyncPeriod(c *config.CompletedConfig) func() time.Duration {
 	}
 }
 
+/*
+main()
+ └── app.NewControllerManagerCommand()
+       └── 创建了一个 *cobra.Command 对象
+            └── command.Execute()
+                  └── cobra 执行实际命令
+                        └── command.Run() 回调触发
+                              └── s.Config(...) 生成配置
+                              └── Run(c.Complete(), wait.NeverStop)
+                                    └── 判断是否开启选举：
+                                         ├── 若不开启 LeaderElection，直接执行 run(ctx)
+                                         └── 若开启 LeaderElection，进入：
+                                               └── leaderelection.RunOrDie(...)
+                                                     └── OnStartedLeading = run(ctx)
+                                                           └── 创建 ControllerContext
+                                                           └── StartControllers(...)
+                                                           └── informerFactory.Start()
+
+	这段代码是 Kubernetes 控制器管理器（kube-controller-manager）的核心启动逻辑，也就是 Run 函数的完整实现。这个函数的作用是 启动整个 kube-controller-manager 进程，包括：
+	启动并运行所有控制器，例如：
+	• ReplicaSet 控制器
+	• Deployment 控制器
+	• Node 控制器
+	• ServiceAccount 控制器 等
+	同时，它负责：
+	• 启动 HTTP 服务（提供健康检查、调试等接口）
+	• 初始化 informer 和控制器上下文
+	• 判断是否启用主节点选举（Leader Election），并在成为 leader 后执行控制器逻辑
+*/
 // Run runs the KubeControllerManagerOptions.  This should never exit.
 func Run(c *config.CompletedConfig, stopCh <-chan struct{}) error {
 	// To help debugging, immediately log version
@@ -180,15 +209,22 @@ func Run(c *config.CompletedConfig, stopCh <-chan struct{}) error {
 		klog.Errorf("unable to register configz: %v", err)
 	}
 
-	// 健康监测与http服务，跳过
+	// 注册 Configz
+	// • configz 是一个用于动态查看运行时配置的调试工具（可通过 HTTP 访问）
+	// • 这里注册 kube-controller-manager 的配置信息到 configz
 	// Setup any healthz checks we will want to use.
 	var checks []healthz.HealthChecker
 	var electionChecker *leaderelection.HealthzAdaptor
+
+	// 如果启用了 Leader 选举，则添加健康检查项（Healthz）来暴露 leader 状态
 	if c.ComponentConfig.Generic.LeaderElection.LeaderElect {
 		electionChecker = leaderelection.NewLeaderHealthzAdaptor(time.Second * 20)
 		checks = append(checks, electionChecker)
 	}
 
+	// 启动 HTTP 服务, 包括两个端口：
+	// • SecureServing：安全端口，带认证和授权
+	// • InsecureServing：非安全端口（仅开发调试用）
 	// Start the controller manager HTTP server
 	// unsecuredMux is the handler for these controller *after* authn/authz filters have been applied
 	var unsecuredMux *mux.PathRecorderMux
@@ -215,6 +251,9 @@ func Run(c *config.CompletedConfig, stopCh <-chan struct{}) error {
 		}
 		// client认证相关
 		var clientBuilder controller.ControllerClientBuilder
+
+		// 如果启用 service account，则根据配置生成对应的 client，用于控制器使用
+		// 可选传统或动态 token 刷新方式（TokenRequest API）
 		if c.ComponentConfig.KubeCloudShared.UseServiceAccountCredentials {
 			if len(c.ComponentConfig.SAController.ServiceAccountKeyFile) == 0 {
 				// It's possible another controller process is creating the tokens for us.
@@ -241,17 +280,20 @@ func Run(c *config.CompletedConfig, stopCh <-chan struct{}) error {
 		} else {
 			clientBuilder = rootClientBuilder
 		}
+		// 封装了启动控制器所需的上下文、共享 informer、客户端等
 		controllerContext, err := CreateControllerContext(c, rootClientBuilder, clientBuilder, ctx.Done())
 		if err != nil {
 			klog.Fatalf("error building controller context: %v", err)
 		}
 		saTokenControllerInitFunc := serviceAccountTokenControllerStarter{rootClientBuilder: rootClientBuilder}.startServiceAccountTokenController
 
+		// 根据注册的控制器初始化器列表，启动每个控制器
 		if err := StartControllers(controllerContext, saTokenControllerInitFunc, NewControllerInitializers(controllerContext.LoopMode), unsecuredMux); err != nil {
 			klog.Fatalf("error starting controllers: %v", err)
 		}
 
-		// 创建controller的上下文context
+		// 启动 Informer 工厂
+		// • 启动 informer，开始监听资源变化事件。
 		controllerContext.InformerFactory.Start(controllerContext.Stop)
 		controllerContext.ObjectOrMetadataInformerFactory.Start(controllerContext.Stop)
 		close(controllerContext.InformersStarted)
@@ -259,7 +301,7 @@ func Run(c *config.CompletedConfig, stopCh <-chan struct{}) error {
 		select {}
 	}
 
-	// 是否进行选举
+	// 是否使用 Leader 选举, 如果不启用选举，直接运行 run()（常用于本地测试）
 	if !c.ComponentConfig.Generic.LeaderElection.LeaderElect {
 		run(context.TODO())
 		panic("unreachable")
@@ -517,14 +559,32 @@ func CreateControllerContext(s *config.CompletedConfig, rootClientBuilder, clien
 	return ctx, nil
 }
 
+/*
+	启动所有内建控制器（如 deployment controller、replicaset controller 等）
+	• ctx ControllerContext
+	    控制器上下文，包含所有控制器共享的配置、client、informer 等核心信息。
+	• startSATokenController InitFunc
+	    启动 ServiceAccount Token Controller 的初始化函数（必须最早启动，因为其他控制器可能要用它创建 token）。
+	• controllers map[string]InitFunc
+	    所有可启动的控制器映射，key 是控制器名字，value 是对应启动函数（InitFunc 类型）。
+	• unsecuredMux
+	    用于注册每个控制器的 debug http handler（/debug/controllers/xxx）。
+*/
 // StartControllers starts a set of controllers with a specified ControllerContext
 func StartControllers(ctx ControllerContext, startSATokenController InitFunc, controllers map[string]InitFunc, unsecuredMux *mux.PathRecorderMux) error {
+
+	// 启动 ServiceAccount Token Controller
+	// • 这是最重要的控制器之一，负责生成 ServiceAccount 的 token。
+	// • 必须优先启动，否则后续控制器无法认证请求 apiserver。
 	// Always start the SA token controller first using a full-power client, since it needs to mint tokens for the rest
 	// If this fails, just return here and fail since other controllers won't be able to get credentials.
 	if _, _, err := startSATokenController(ctx); err != nil {
 		return err
 	}
 
+	// 初始化 cloud provider
+	// • 如果启用了云平台（如 GCE、AWS），那么控制器需要和云资源打交道
+	// • 此处延迟初始化，确保 clientBuilder 可用
 	// Initialize the cloud provider with a reference to the clientBuilder only after token controller
 	// has started in case the cloud provider uses the client builder.
 	if ctx.Cloud != nil {
