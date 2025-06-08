@@ -132,7 +132,15 @@ func (g *genericScheduler) snapshot() error {
 	return g.cache.UpdateSnapshot(g.nodeInfoSnapshot)
 }
 
-// genericScheduler 的 Schedule 的实现
+/*
+	这是 Kubernetes Scheduler 调度周期中的 核心步骤——“选择节点”，也称为 Scheduling Framework 的 Schedule 阶段。
+	它的作用就是：
+	[在当前所有节点中，选出最合适的一个节点 来承载当前这个 pod]
+	这是调度器运行的第一步，后续才会进行：
+		• assume（假设绑定）
+		• permit/prebind/bind/postbind（插件链）
+		• 异步的实际 bind() 到节点
+*/
 // Schedule tries to schedule the given pod to one of the nodes in the node list.
 // If it succeeds, it will return the name of the node.
 // If it fails, it will return a FitError error with reasons.
@@ -140,32 +148,37 @@ func (g *genericScheduler) Schedule(ctx context.Context, prof *profile.Profile, 
 	trace := utiltrace.New("Scheduling", utiltrace.Field{Key: "namespace", Value: pod.Namespace}, utiltrace.Field{Key: "name", Value: pod.Name})
 	defer trace.LogIfLong(100 * time.Millisecond)
 
-	// 对 pod 进行 pvc 的信息检查
+	// 检查 Pod 是否存在基础问题，例如 PVC（PersistentVolumeClaim）是否可用
 	if err := podPassesBasicChecks(pod, g.pvcLister); err != nil {
 		return result, err
 	}
 	trace.Step("Basic checks done")
 
-	// 对当前的信息做一个快照
+	// 快照缓存中的 Node 信息
+	// • 从调度器内部的缓存中做快照，获取当前所有节点（Node）的信息。
+	// • 避免调度过程中节点状态发生变化导致不一致。
 	if err := g.snapshot(); err != nil {
 		return result, err
 	}
 	trace.Step("Snapshotting scheduler cache and node infos done")
 
-	// Node 节点数量为0，表示无可用节点
+	// 快速失败处理：没有节点可用，直接返回
 	if g.nodeInfoSnapshot.NumNodes() == 0 {
 		return result, ErrNoNodesAvailable
 	}
 
 	startPredicateEvalTime := time.Now()
-	// Predict阶段：找到所有满足调度条件的节点feasibleNodes，不满足的就直接过滤
+	// 过滤节点（Predicates 阶段）
+	// • 将不满足调度条件的 Node 剔除
+	// • 比如：资源不足、亲和性规则不符、污点容忍不符等
+	// • feasibleNodes 是剩下符合条件的节点
 	feasibleNodes, filteredNodesStatuses, err := g.findNodesThatFitPod(ctx, prof, state, pod)
 	if err != nil {
 		return result, err
 	}
 	trace.Step("Computing predicates done")
 
-	// 没有可用节点直接报错
+	// 没有符合条件的 Node, 调度失败
 	if len(feasibleNodes) == 0 {
 		return result, &FitError{
 			Pod:                   pod,
@@ -178,7 +191,8 @@ func (g *genericScheduler) Schedule(ctx context.Context, prof *profile.Profile, 
 	metrics.DeprecatedSchedulingDuration.WithLabelValues(metrics.PredicateEvaluation).Observe(metrics.SinceInSeconds(startPredicateEvalTime))
 
 	startPriorityEvalTime := time.Now()
-	// 只有一个节点就直接选用
+	// 仅有一个节点？直接返回它
+	// 这是一个性能优化：如果只剩下一个节点，那就不用再做打分了
 	// When only one node after predicate, just use it.
 	if len(feasibleNodes) == 1 {
 		metrics.DeprecatedSchedulingAlgorithmPriorityEvaluationSecondsDuration.Observe(metrics.SinceInSeconds(startPriorityEvalTime))
@@ -190,6 +204,8 @@ func (g *genericScheduler) Schedule(ctx context.Context, prof *profile.Profile, 
 	}
 
 	// Priority阶段：通过打分，找到一个分数最高、也就是最优的节点
+	// • 对所有可行的 Node 进行打分
+	// • 使用调度策略插件（如 LeastRequestedPriority, BalancedResourceAllocation）来对每个 Node 进行评分
 	priorityList, err := g.prioritizeNodes(ctx, prof, state, pod, feasibleNodes)
 	if err != nil {
 		return result, err
@@ -198,9 +214,11 @@ func (g *genericScheduler) Schedule(ctx context.Context, prof *profile.Profile, 
 	metrics.DeprecatedSchedulingAlgorithmPriorityEvaluationSecondsDuration.Observe(metrics.SinceInSeconds(startPriorityEvalTime))
 	metrics.DeprecatedSchedulingDuration.WithLabelValues(metrics.PriorityEvaluation).Observe(metrics.SinceInSeconds(startPriorityEvalTime))
 
+	// 选出得分最高的 Node
 	host, err := g.selectHost(priorityList)
 	trace.Step("Prioritizing done")
 
+	// 返回调度结果
 	return ScheduleResult{
 		SuggestedHost:  host,
 		EvaluatedNodes: len(feasibleNodes) + len(filteredNodesStatuses),

@@ -167,7 +167,7 @@ func (sched *Scheduler) onCSINodeUpdate(oldObj, newObj interface{}) {
 	sched.SchedulingQueue.MoveAllToActiveOrBackoffQueue(queue.CSINodeUpdate)
 }
 
-// 牢记我们第一阶段要分析的对象：create nginx pod，所以进入这个add的操作，对应加入到队列
+// 如create nginx pod，所以进入这个add的操作，对应加入到队列
 func (sched *Scheduler) addPodToSchedulingQueue(obj interface{}) {
 	pod := obj.(*v1.Pod)
 	klog.V(3).Infof("add event for unscheduled pod %s/%s", pod.Namespace, pod.Name)
@@ -358,13 +358,18 @@ func (sched *Scheduler) skipPodUpdate(pod *v1.Pod) bool {
 	return true
 }
 
-// 在上面实例化Scheduler后，有个注册事件 Handler 的函数：addAllEventHandlers(sched, informerFactory, podInformer)
+/*
+	这段代码的作用是：为 kube-scheduler 注册 Informer 事件监听器，当集群中的 Pod、Node、PV、PVC、Service 等关键资源发生变化时，
+	触发调度器的回调函数以更新调度队列和缓存，从而保持调度器对集群状态的感知能力。
+	它是实现 Kubernetes 调度器“事件驱动”调度机制 的基础组件之一。
+*/
 // addAllEventHandlers is a helper function used in tests and in Scheduler
 // to add event handlers for various informers.
 func addAllEventHandlers(
 	sched *Scheduler,
 	informerFactory informers.SharedInformerFactory,
 ) {
+	// 监听已调度 Pod（assigned） ➜ 更新 Scheduler Cache
 	// scheduled pod cache
 	informerFactory.Core().V1().Pods().Informer().AddEventHandler(
 		cache.FilteringResourceEventHandler{
@@ -372,6 +377,7 @@ func addAllEventHandlers(
 			FilterFunc: func(obj interface{}) bool {
 				switch t := obj.(type) {
 				case *v1.Pod:
+					// assignedPod(t) 为真，即该 Pod 已绑定 Node。
 					return assignedPod(t)
 				case cache.DeletedFinalStateUnknown:
 					if pod, ok := t.Obj.(*v1.Pod); ok {
@@ -392,12 +398,16 @@ func addAllEventHandlers(
 			},
 		},
 	)
+
+	// 监听未调度 Pod（unassigned） ➜ 更新 SchedulingQueue（调度队列）
+	// 作用：更新调度队列，确保调度器能感知有新 Pod 等待调度，或者 Pod 状态发生了变化。
 	// unscheduled pod queue
 	informerFactory.Core().V1().Pods().Informer().AddEventHandler(
 		cache.FilteringResourceEventHandler{
 			FilterFunc: func(obj interface{}) bool {
 				switch t := obj.(type) {
 				case *v1.Pod:
+					// 只有调度器负责调度该 Pod（schedulerName 匹配）并且 Pod 尚未调度时才处理。
 					return !assignedPod(t) && responsibleForPod(t, sched.Profiles)
 				case cache.DeletedFinalStateUnknown:
 					if pod, ok := t.Obj.(*v1.Pod); ok {
@@ -418,6 +428,7 @@ func addAllEventHandlers(
 		},
 	)
 
+	// 监听 Node 变化 ➜ 更新 Scheduler Cache
 	informerFactory.Core().V1().Nodes().Informer().AddEventHandler(
 		cache.ResourceEventHandlerFuncs{
 			AddFunc:    sched.addNodeToCache,
@@ -435,6 +446,7 @@ func addAllEventHandlers(
 		)
 	}
 
+	// 监听 PersistentVolume（PV）变化
 	// On add and delete of PVs, it will affect equivalence cache items
 	// related to persistent volume
 	informerFactory.Core().V1().PersistentVolumes().Informer().AddEventHandler(
@@ -445,6 +457,7 @@ func addAllEventHandlers(
 		},
 	)
 
+	// 监听 PersistentVolumeClaim（PVC）变化
 	// This is for MaxPDVolumeCountPredicate: add/delete PVC will affect counts of PV when it is bound.
 	informerFactory.Core().V1().PersistentVolumeClaims().Informer().AddEventHandler(
 		cache.ResourceEventHandlerFuncs{
@@ -453,6 +466,7 @@ func addAllEventHandlers(
 		},
 	)
 
+	// 监听 Service 变化
 	// This is for ServiceAffinity: affected by the selector of the service is updated.
 	// Also, if new service is added, equivalence cache will also become invalid since
 	// existing pods may be "captured" by this service and change this predicate result.
@@ -464,6 +478,7 @@ func addAllEventHandlers(
 		},
 	)
 
+	// 监听 StorageClass
 	informerFactory.Storage().V1().StorageClasses().Informer().AddEventHandler(
 		cache.ResourceEventHandlerFuncs{
 			AddFunc: sched.onStorageClassAdd,

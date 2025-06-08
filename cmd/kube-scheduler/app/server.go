@@ -26,6 +26,7 @@ import (
 	cliflag "k8s.io/component-base/cli/flag"
 	"k8s.io/component-base/cli/globalflag"
 	"k8s.io/component-base/term"
+	"k8s.io/component-base/version"
 	"k8s.io/component-base/version/verflag"
 	"k8s.io/klog/v2"
 	"net/http"
@@ -157,7 +158,21 @@ func runCommand(cmd *cobra.Command, opts *options.Options, registryOptions ...Op
 	return Run(ctx, cc, sched)
 }
 
-// 运行调度策略
+/*
+	main()
+	└── app.NewSchedulerCommand()
+		└── Run: runCommand()
+			└── Setup()
+				└── create scheduler 实例、构建配置
+			└── Run(ctx, cc, sched)
+				├── 注册 configz
+				├── 启动健康检查和 metrics 服务
+				├── 启动 informer
+				├── 等待 informer 同步
+				└── LeaderElection（是否）
+					├── 是：sched.Run(ctx) 在 OnStartedLeading 中执行
+					└── 否：sched.Run(ctx) 直接执行
+*/
 // Run executes the scheduler based on the given configuration. It only returns on error or when context is done.
 func Run(ctx context.Context, cc *schedulerserverconfig.CompletedConfig, sched *scheduler.Scheduler) error {
 	// To help debugging, immediately log version
@@ -171,17 +186,22 @@ func Run(ctx context.Context, cc *schedulerserverconfig.CompletedConfig, sched *
 		return fmt.Errorf("unable to register configz: %s", err)
 	}
 
-	// 事件广播管理器，涉及到k8s里的一个核心资源 - Event事件，暂时不细讲
+	// 事件系统是 Kubernetes 控制面核心机制，调度器可通过 Event 向用户汇报 Pod 的调度状态吗，这行代码启动了一个事件记录器
 	// Prepare the event broadcaster.
 	cc.EventBroadcaster.StartRecordingToSink(ctx.Done())
 
-	// 健康监测的服务
+	// 设置健康检查服务（healthz）
+	// 如果启用了 Leader 选举，会加入一个健康检查项 WatchDog，用于判断是否健康持有 leader 身份
 	// Setup healthz checks.
 	var checks []healthz.HealthChecker
 	if cc.ComponentConfig.LeaderElection.LeaderElect {
 		checks = append(checks, cc.LeaderElection.WatchDog)
 	}
 
+	// 启动健康检查 / 指标 / 安全服务端口
+	// 调度器可能开启三个 HTTP 服务：
+
+	//  Insecure 健康检查
 	// Start up the healthz server.
 	if cc.InsecureServing != nil {
 		separateMetrics := cc.InsecureMetricsServing != nil
@@ -190,12 +210,16 @@ func Run(ctx context.Context, cc *schedulerserverconfig.CompletedConfig, sched *
 			return fmt.Errorf("failed to start healthz server: %v", err)
 		}
 	}
+
+	// Insecure 指标服务（如 Prometheus metrics）
 	if cc.InsecureMetricsServing != nil {
 		handler := buildHandlerChain(newMetricsHandler(&cc.ComponentConfig), nil, nil)
 		if err := cc.InsecureMetricsServing.Serve(handler, 0, ctx.Done()); err != nil {
 			return fmt.Errorf("failed to start metrics server: %v", err)
 		}
 	}
+
+	// Secure HTTPS 服务（带身份验证和授权）
 	if cc.SecureServing != nil {
 		handler := buildHandlerChain(newHealthzHandler(&cc.ComponentConfig, false, checks...), cc.Authentication.Authenticator, cc.Authorization.Authorizer)
 		// TODO: handle stoppedCh returned by c.SecureServing.Serve
@@ -205,9 +229,13 @@ func Run(ctx context.Context, cc *schedulerserverconfig.CompletedConfig, sched *
 		}
 	}
 
+	// 启动 Informer 并同步缓存
 	// Start all informers.
 	cc.InformerFactory.Start(ctx.Done())
 
+	// informer 是调度器监听资源（如 Pod、Node、Binding 等）的机制。
+	// 先启动，然后等待所有资源缓存同步完成。
+	// 只有缓存同步成功后，调度器才能确保调度决策基于最新状态。
 	// Wait for all caches to sync before scheduling.
 	cc.InformerFactory.WaitForCacheSync(ctx.Done())
 

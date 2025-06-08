@@ -107,13 +107,19 @@ func (c *Configurator) buildFramework(p schedulerapi.KubeSchedulerProfile, opts 
 	)
 }
 
-// 回头去找 SchedulerCache 初始化的地方
+/*
+	根据插件配置和 Extender 构建 Scheduler 实例
+	它是调度器创建的核心逻辑，负责组装调度器运行所需的各个组件，并最终生成一个 *Scheduler 对象
+*/
 // create a scheduler from a set of registered plugins.
 func (c *Configurator) create() (*Scheduler, error) {
 	var extenders []framework.Extender
 	var ignoredExtendedResources []string
+
+	// 处理 Extender（扩展调度器）
 	if len(c.extenders) != 0 {
 		var ignorableExtenders []framework.Extender
+		// 遍历调度器的扩展器配置 c.extenders，使用 core.NewHTTPExtender() 创建实际的 Extender 实例（可能是一个外部的 HTTP 服务）
 		for ii := range c.extenders {
 			klog.V(2).Infof("Creating extender with config %+v", c.extenders[ii])
 			extender, err := core.NewHTTPExtender(&c.extenders[ii])
@@ -135,6 +141,7 @@ func (c *Configurator) create() (*Scheduler, error) {
 		extenders = append(extenders, ignorableExtenders...)
 	}
 
+	// 将 Extender 忽略的资源注入到 Profile PluginConfig 中
 	// If there are any extended resources found from the Extenders, append them to the pluginConfig for each profile.
 	// This should only have an effect on ComponentConfig v1beta1, where it is possible to configure Extenders and
 	// plugin args (and in which case the extender ignored resources take precedence).
@@ -153,8 +160,13 @@ func (c *Configurator) create() (*Scheduler, error) {
 		}
 	}
 
+	// 创建 PodNominator（推荐候选 pod）
 	// The nominator will be passed all the way to framework instantiation.
 	nominator := internalqueue.NewSafePodNominator(c.informerFactory.Core().V1().Pods().Lister())
+
+	// 创建 Scheduler Profile 映射
+	// • 每个 SchedulerProfile 都有独立的插件链（Filter、Score、Bind 等插件）。
+	// • 这是插件框架的初始化过程，会通过 c.buildFramework 构建 Framework 实例。
 	profiles, err := profile.NewMap(c.profiles, c.buildFramework, c.recorderFactory,
 		frameworkruntime.WithPodNominator(nominator))
 	if err != nil {
@@ -165,7 +177,7 @@ func (c *Configurator) create() (*Scheduler, error) {
 	}
 	// Profiles are required to have equivalent queue sort plugins.
 	lessFn := profiles[c.profiles[0].SchedulerName].Framework.QueueSortFunc()
-	// 实例化 podQueue
+	// 初始化 Pod Queue（调度队列）
 	podQueue := internalqueue.NewSchedulingQueue(
 		lessFn,
 		internalqueue.WithPodInitialBackoffDuration(time.Duration(c.podInitialBackoffSeconds)*time.Second),
@@ -182,6 +194,10 @@ func (c *Configurator) create() (*Scheduler, error) {
 	)
 	debugger.ListenForSignal(c.StopEverything)
 
+	// 创建 GenericScheduler（调度算法核心）
+	// • 这是调度决策的主逻辑实现类。
+	// • 接收 schedulerCache、NodeInfoSnapshot、extenders 等。
+	// • 用于实际执行 scheduleOne() 的逻辑。
 	algo := core.NewGenericScheduler(
 		c.schedulerCache,
 		c.nodeInfoSnapshot,
@@ -192,14 +208,18 @@ func (c *Configurator) create() (*Scheduler, error) {
 	)
 
 	return &Scheduler{
+		// 缓存节点和 Pod 信息
 		SchedulerCache: c.schedulerCache,
-		Algorithm:      algo,
-		Profiles:       profiles,
-		// NextPod 函数依赖于 podQueue
-		NextPod:        internalqueue.MakeNextPodFunc(podQueue),
+		// 调度算法（GenericScheduler）
+		Algorithm: algo,
+		// 调度器插件配置集
+		Profiles: profiles,
+		// 获取下一个待调度 Pod 的函数
+		NextPod: internalqueue.MakeNextPodFunc(podQueue),
+		// 处理调度失败的函数
 		Error:          MakeDefaultErrorFunc(c.client, c.informerFactory.Core().V1().Pods().Lister(), podQueue, c.schedulerCache),
 		StopEverything: c.StopEverything,
-		// 调度队列被赋值为podQueue
+		// 实际的调度队列，实现抢占、backoff 等逻辑
 		SchedulingQueue: podQueue,
 	}, nil
 }

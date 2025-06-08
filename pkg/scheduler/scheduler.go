@@ -184,7 +184,17 @@ var defaultSchedulerOptions = schedulerOptions{
 	podMaxBackoffSeconds:     int64(internalqueue.DefaultPodMaxBackoffDuration.Seconds()),
 }
 
-// Scheduler的实例化函数
+/*
+	这段代码是 Kubernetes 中调度器（Scheduler）的构造函数.
+	作用：
+	• 构造并初始化一个 Scheduler 实例，准备好运行调度任务的所有内部组件和配置.
+	• 这是整个调度器生命周期中的 初始化阶段，它把各种配置、插件、缓存等整合起来，创建出可以真正调度 Pod 的核心调度器对象.
+	main()
+	 └── NewSchedulerCommand()
+      	 └── runCommand()
+           	  └── scheduler.New(...) ← 你贴的这段
+               	    └── 创建并配置 Scheduler
+*/
 // New returns a Scheduler
 func New(client clientset.Interface,
 	informerFactory informers.SharedInformerFactory,
@@ -197,14 +207,16 @@ func New(client clientset.Interface,
 		stopEverything = wait.NeverStop
 	}
 
+	// 应用传入的可选配置（Option 是函数式参数），比如调度策略、插件配置等
 	options := defaultSchedulerOptions
 	for _, opt := range opts {
 		opt(&options)
 	}
 
-	// 这里就是初始化的实例 schedulerCache
+	// 创建内部缓存（schedulerCache），用于缓存 node 信息、Pod 状态等。
 	schedulerCache := internalcache.New(30*time.Second, stopEverything)
 
+	// 初始化并合并调度插件（plugins）的注册表,插件用于控制调度策略，如打分、过滤、预选、抢占等。
 	// 先注册了所有的算法，保存到一个 map[string]PluginFactory 中
 	registry := frameworkplugins.NewInTreeRegistry()
 	if err := registry.Merge(options.frameworkOutOfTreeRegistry); err != nil {
@@ -213,6 +225,9 @@ func New(client clientset.Interface,
 
 	snapshot := internalcache.NewEmptySnapshot()
 
+	// 创建 Configurator 对象, Configurator 是调度器配置构建器，它负责：
+	// • 从 provider 名称或策略文件构建调度器（通过 createFromProvider 或 createFromConfig）
+	// • 包含 client、informer、插件注册表、快照、backoff 策略等配置
 	configurator := &Configurator{
 		client:                   client,
 		recorderFactory:          recorderFactory,
@@ -234,8 +249,9 @@ func New(client clientset.Interface,
 	// 重点看一下Scheduler的创建过程
 	var sched *Scheduler
 	source := options.schedulerAlgorithmSource
+	// 根据算法来源（AlgorithmSource）创建调度器实例
 	switch {
-	// 从 Provider 创建
+	// Provider：常见的内置策略，比如 "DefaultProvider"，推荐使用
 	case source.Provider != nil:
 		// Create the config from a named algorithm provider.
 		sc, err := configurator.createFromProvider(*source.Provider)
@@ -243,7 +259,7 @@ func New(client clientset.Interface,
 			return nil, fmt.Errorf("couldn't create scheduler using provider %q: %v", *source.Provider, err)
 		}
 		sched = sc
-	// 从文件或者ConfigMap中创建
+	// Policy：已废弃的策略配置方式（来自文件或 ConfigMap）
 	case source.Policy != nil:
 		// Create the config from a user specified policy source.
 		policy := &schedulerapi.Policy{}
@@ -273,6 +289,9 @@ func New(client clientset.Interface,
 	sched.StopEverything = stopEverything
 	sched.client = client
 
+	// 注册所有事件处理器（informer 监听）
+	// • 注册 Pod、Node 等资源的事件监听器
+	// • 用于感知集群状态的变化，触发调度逻辑
 	addAllEventHandlers(sched, informerFactory)
 	return sched, nil
 }
@@ -313,12 +332,22 @@ func initPolicyFromConfigMap(client clientset.Interface, policyRef *schedulerapi
 	return nil
 }
 
-// 了解入队和出队操作后，我们看一下Scheduler运行的过程
+/*
+	这行代码启动了 调度队列（SchedulingQueue）的后台处理逻辑。
+	什么是 SchedulingQueue？
+	• 它是一个存放 等待调度的 Pod 的队列。
+	• 调度器只从这个队列中取出 pod 进行调度。
+	• 后台逻辑通常包括：
+		• 根据优先级进行分类管理（active queue, backoff queue, unschedulable queue）。
+		• 处理因调度失败而退避（backoff）的 pod。
+		• 监听事件（如 Node/PVC 可用），将 Pod 重新放回 active 队列。
+*/
 // Run begins watching and scheduling. It waits for cache to be synced, then starts scheduling and blocked until the context is done.
 func (sched *Scheduler) Run(ctx context.Context) {
 	sched.SchedulingQueue.Run()
-	// 调度一个pod对象
+	// 这是主循环，不断尝试调度一个 Pod，直到上下文结束（例如调度器被关掉）
 	wait.UntilWithContext(ctx, sched.scheduleOne, 0)
+	// 当调度器退出（如 ctx.Done() 触发）后，关闭调度队列，清理资源，防止内存泄漏
 	sched.SchedulingQueue.Close()
 }
 
@@ -373,21 +402,35 @@ func updatePod(client clientset.Interface, pod *v1.Pod, condition *v1.PodConditi
 	return util.PatchPodStatus(client, pod, podStatusCopy)
 }
 
+/*
+	为什么需要 assume 机制？
+	调度器是一个高性能组件，目标是每秒可以调度成千上万个 Pod。
+	如果调度器在选好 Node 之后就同步等待绑定完成，会大大降低吞吐量。
+	所以 Kubernetes 设计成：
+	[选好 Node → 马上调用 assume 认为绑定一定会成功 → 异步去调用 bind() 真的绑定到 Node 上]
+	如果绑定失败了，也可以通过 forget() 等方法撤销这个绑定假定。
+*/
 // assume signals to the cache that a pod is already in the cache, so that binding can be asynchronous.
 // assume modifies `assumed`.
 func (sched *Scheduler) assume(assumed *v1.Pod, host string) error {
-	// 将 host 填入到 pod spec字段的nodename，假定分配到对应的节点上
+	// 在 Pod 的 spec.nodeName 字段写入目标节点名
+	// 这一步是关键：Kubernetes 中 Pod 是否被调度，其标志就是 spec.nodeName 是否为空
 	// Optimistically assume that the binding will succeed and send it to apiserver
 	// in the background.
 	// If the binding fails, scheduler will release resources allocated to assumed pod
 	// immediately.
 	assumed.Spec.NodeName = host
 
-	// 调用 SchedulerCache 下的 AssumePod
+	// 调度器有一个内部缓存 SchedulerCache，里面记录着所有正在调度的 Pod。
+	// • AssumePod 的作用是：
+	// 	 • 将这个 pod 加入内部缓存，并标记为 “assumed（假定）” 状态
+	//   • 表示这个 pod 已经进入调度流程，避免别的调度器重复调度它（特别是并发调度或 HA 场景）
 	if err := sched.SchedulerCache.AssumePod(assumed); err != nil {
 		klog.Errorf("scheduler cache AssumePod failed: %v", err)
 		return err
 	}
+
+	// 从调度队列中移除候选 Pod（nominated pod）
 	// if "assumed" is a nominated pod, we should remove it from internal cache
 	if sched.SchedulingQueue != nil {
 		sched.SchedulingQueue.DeleteNominatedPodIfExists(assumed)
@@ -396,6 +439,9 @@ func (sched *Scheduler) assume(assumed *v1.Pod, host string) error {
 	return nil
 }
 
+/*
+	这段代码的作用是：尝试将 Pod 真正绑定到指定的节点上，优先使用扩展器，如果扩展器未处理，则通过调度插件完成绑定，并记录绑定结果与耗时指标。
+*/
 // bind binds a pod to a given node defined in a binding object.
 // The precedence for binding is: (1) extenders and (2) framework plugins.
 // We expect this to run asynchronously, so we handle binding metrics internally.
@@ -406,12 +452,16 @@ func (sched *Scheduler) bind(ctx context.Context, prof *profile.Profile, assumed
 		sched.finishBinding(prof, assumed, targetNode, start, err)
 	}()
 
-	// 阶段1： 运行扩展绑定进行验证，如果已经绑定报错
+	// 尝试通过 Extender（扩展器）绑定
+	// • 调度器支持通过 "extenders"（扩展器）来自定义调度逻辑。
+	// • 如果扩展器完成了绑定（返回 bound=true），调度器就不再进行后续的绑定。
+	// • 如果扩展器绑定失败，则返回错误。
+	// 🧩 这适用于一些自定义调度系统或多集群调度场景。
 	bound, err := sched.extendersBinding(assumed, targetNode)
 	if bound {
 		return err
 	}
-	// 阶段2：运行绑定插件验证状态
+	// 运行调度框架的 Bind 插件
 	bindStatus := prof.RunBindPlugins(ctx, state, assumed, targetNode)
 	if bindStatus.IsSuccess() {
 		return nil
@@ -450,9 +500,37 @@ func (sched *Scheduler) finishBinding(prof *profile.Profile, assumed *v1.Pod, ta
 	prof.Recorder.Eventf(assumed, nil, v1.EventTypeNormal, "Scheduled", "Binding", "Successfully assigned %v/%v to %v", assumed.Namespace, assumed.Name, targetNode)
 }
 
+/*
+	main()
+	└── RunCommand()
+		└── Run()
+			└── sched.Run(ctx)
+				├── sched.SchedulingQueue.Run()
+				├── wait.UntilWithContext(ctx, sched.scheduleOne, 0)
+				│   └── scheduleOne(ctx)
+				│       ├── pod := sched.NextPod()
+				│       ├── node := sched.Algorithm.Schedule(...)
+				│       ├── sched.assume(pod, node)
+				│       ├── RunXXXPlugins(...)
+				│       └── go sched.bind(...) 异步绑
+
+	错误处理的一致性设计
+	• 每个阶段（Reserve / Permit / PreBind / Bind）出错都调用：
+		• RunReservePluginsUnreserve()：清理状态。
+		• Cache().ForgetPod()：清理假定分配。
+		• recordSchedulingFailure()：上报失败并重新入队。
+	✨ 总结：为什么这样设计？
+	步骤				原因
+	assume()		加快调度器节奏，减少绑定等待
+	插件机制			支持用户扩展调度逻辑（抢占、延迟审批、打标签等）
+	异步绑定			避免长时间阻塞，提高调度吞吐
+	分阶段失败回滚		保证调度器缓存和实际状态一致性
+	指标收集			支持监控和性能分析
+	这段代码可以看作是 Scheduler 核心调度和绑定流程的“工业级实现”，兼顾性能（异步）、可扩展性（插件）、稳定性（回滚机制）和可观测性（metrics）。
+*/
 // scheduleOne does the entire scheduling workflow for a single pod.  It is serialized on the scheduling algorithm's host fitting.
 func (sched *Scheduler) scheduleOne(ctx context.Context) {
-	// podInfo 就是从队列中获取到的pod对象
+	// 从调度队列获取一个 Pod
 	podInfo := sched.NextPod()
 	// 检查pod的有效性
 	// pod could be nil when schedulerQueue is closed
@@ -481,8 +559,10 @@ func (sched *Scheduler) scheduleOne(ctx context.Context) {
 	state.SetRecordPluginMetrics(rand.Intn(100) < pluginMetricsSamplePercent)
 	schedulingCycleCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	// 调用调度算法，获取结果
+	// 调用调度算法找出适合的节点
 	scheduleResult, err := sched.Algorithm.Schedule(schedulingCycleCtx, prof, state, pod)
+
+	// 如果调度失败可能尝试抢占
 	if err != nil {
 		/*
 			出现调度失败的情况：
@@ -523,11 +603,20 @@ func (sched *Scheduler) scheduleOne(ctx context.Context) {
 		sched.recordSchedulingFailure(prof, podInfo, err, v1.PodReasonUnschedulable, nominatedNode)
 		return
 	}
+
+	// 如果成功
+	// 调度成功后记录延迟, 记录调度算法耗时，用于性能分析
 	metrics.SchedulingAlgorithmLatency.Observe(metrics.SinceInSeconds(start))
 	// assumePod 是假设这个Pod按照前面的调度算法分配后，进行验证
 	// Tell the cache to assume that a pod now is running on a given node, even though it hasn't been bound yet.
 	// This allows us to keep scheduling without waiting on binding to occur.
 	assumedPodInfo := podInfo.DeepCopy()
+
+	// 假定 Pod 被分配到了某节点
+	// • 核心原因：调度器为了高并发调度，不能等待 bind 完成（可能比较慢，如涉及 webhook、CNI）。
+	// • 所以先在 SchedulerCache 中做"假定分配"：将 pod 认为已调度，更新本地 cache。
+	// • 这样下一个 Pod 就可以使用这个更新后的资源信息，继续调度。
+	// • 如果 assume() 失败，说明调度器状态不一致，只能失败回退。
 	assumedPod := assumedPodInfo.Pod
 	// SuggestedHost 为建议的分配的Host
 	// assume modifies `assumedPod` by setting NodeName=scheduleResult.SuggestedHost
@@ -544,7 +633,9 @@ func (sched *Scheduler) scheduleOne(ctx context.Context) {
 		return
 	}
 
-	// 运行相关插件的代码先跳过
+	// • 给插件一个机会做“预占资源”的处理
+	// • 比如为 Pod 保留特定设备、资源
+	// • 如果失败：Unreserve() 插件会被调用清理状态，调度失败
 	// Run the Reserve method of reserve plugins.
 	if sts := prof.RunReservePluginsReserve(schedulingCycleCtx, state, assumedPod, scheduleResult.SuggestedHost); !sts.IsSuccess() {
 		metrics.PodScheduleError(prof.Name, metrics.SinceInSeconds(start))
@@ -557,6 +648,10 @@ func (sched *Scheduler) scheduleOne(ctx context.Context) {
 		return
 	}
 
+	// Permit 插件执行：可用于异步审批机制
+	// • 插件可以返回 Wait 状态：表示等待异步审批（例如：资源队列、外部策略控制器）。
+	// • 如果不是成功或等待，调度失败并清理。
+	// • 注意后面还有 WaitOnPermit() 阻塞等待这些插件的信号。
 	// Run "permit" plugins.
 	runPermitStatus := prof.RunPermitPlugins(schedulingCycleCtx, state, assumedPod, scheduleResult.SuggestedHost)
 	if runPermitStatus.Code() != framework.Wait && !runPermitStatus.IsSuccess() {
@@ -577,7 +672,10 @@ func (sched *Scheduler) scheduleOne(ctx context.Context) {
 		return
 	}
 
-	// 异步绑定pod
+	// 异步绑定操作
+	// • assume 后就认为 pod 被调度成功。
+	// • 绑定过程可能慢（如调用外部 webhook / 多网络插件），异步可以提升调度吞吐。
+	// • Scheduler 不必阻塞等待，可以调度下一个 Pod。
 	// bind the pod to its host asynchronously (we can do this b/c of the assumption step above).
 	go func() {
 		bindingCycleCtx, cancel := context.WithCancel(ctx)
@@ -585,6 +683,8 @@ func (sched *Scheduler) scheduleOne(ctx context.Context) {
 		metrics.SchedulerGoroutines.WithLabelValues("binding").Inc()
 		defer metrics.SchedulerGoroutines.WithLabelValues("binding").Dec()
 
+		// 如果 Permit 插件之前返回 Wait，这里会等待其允许或拒绝。
+		// 拒绝则认为调度失败。
 		waitOnPermitStatus := prof.WaitOnPermit(bindingCycleCtx, assumedPod)
 		if !waitOnPermitStatus.IsSuccess() {
 			var reason string
@@ -604,6 +704,9 @@ func (sched *Scheduler) scheduleOne(ctx context.Context) {
 			return
 		}
 
+		// PreBind 插件执行
+		// • 在实际执行绑定前，插件可进行最后确认，比如生成额外 metadata
+		// • 失败则也是调度失败，并清理缓存
 		// Run "prebind" plugins.
 		preBindStatus := prof.RunPreBindPlugins(bindingCycleCtx, state, assumedPod, scheduleResult.SuggestedHost)
 		if !preBindStatus.IsSuccess() {
@@ -617,7 +720,9 @@ func (sched *Scheduler) scheduleOne(ctx context.Context) {
 			return
 		}
 
-		// 真正做绑定的动作
+		// 执行绑定：真实将 pod 绑定到 node
+		// 调用 kube-apiserver 执行 PATCH，将 pod.spec.nodeName 设置为目标 Node
+		// 如果失败，再次调用 Unreserve 和 ForgetPod 做清理
 		err := sched.bind(bindingCycleCtx, prof, assumedPod, scheduleResult.SuggestedHost, state)
 		if err != nil {
 			metrics.PodScheduleError(prof.Name, metrics.SinceInSeconds(start))
@@ -637,7 +742,7 @@ func (sched *Scheduler) scheduleOne(ctx context.Context) {
 			metrics.PodSchedulingAttempts.Observe(float64(podInfo.Attempts))
 			metrics.PodSchedulingDuration.WithLabelValues(getAttemptsLabel(podInfo)).Observe(metrics.SinceInSeconds(podInfo.InitialAttemptTimestamp))
 
-			// 运行绑定后的插件
+			// 运行绑定后的插件,用于记录成功事件、通知其他组件或做收尾处理
 			// Run "postbind" plugins.
 			prof.RunPostBindPlugins(bindingCycleCtx, state, assumedPod, scheduleResult.SuggestedHost)
 		}
