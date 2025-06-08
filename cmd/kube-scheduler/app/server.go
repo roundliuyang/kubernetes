@@ -20,12 +20,17 @@ package app
 import (
 	"context"
 	"fmt"
+	"github.com/spf13/cobra"
 	"io"
+	"k8s.io/client-go/tools/leaderelection"
+	cliflag "k8s.io/component-base/cli/flag"
+	"k8s.io/component-base/cli/globalflag"
+	"k8s.io/component-base/term"
+	"k8s.io/component-base/version/verflag"
+	"k8s.io/klog/v2"
 	"net/http"
 	"os"
 	goruntime "runtime"
-
-	"github.com/spf13/cobra"
 
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/apiserver/pkg/authentication/authenticator"
@@ -37,16 +42,9 @@ import (
 	"k8s.io/apiserver/pkg/server/mux"
 	"k8s.io/apiserver/pkg/server/routes"
 	"k8s.io/client-go/tools/events"
-	"k8s.io/client-go/tools/leaderelection"
-	cliflag "k8s.io/component-base/cli/flag"
-	"k8s.io/component-base/cli/globalflag"
 	"k8s.io/component-base/configz"
 	"k8s.io/component-base/logs"
 	"k8s.io/component-base/metrics/legacyregistry"
-	"k8s.io/component-base/term"
-	"k8s.io/component-base/version"
-	"k8s.io/component-base/version/verflag"
-	"k8s.io/klog/v2"
 	schedulerserverconfig "k8s.io/kubernetes/cmd/kube-scheduler/app/config"
 	"k8s.io/kubernetes/cmd/kube-scheduler/app/options"
 	"k8s.io/kubernetes/pkg/api/legacyscheme"
@@ -60,13 +58,24 @@ import (
 // Option configures a framework.Registry.
 type Option func(runtime.Registry) error
 
+/*
+	这段代码的目的是构建 kube-scheduler 的命令行入口对象 *cobra.Command，配置它的参数、执行逻辑和帮助信息，供主函数调用并执行。
+	它让 main() 中的一行：command := app.NewSchedulerCommand()具备了完整的 CLI 能力，让你可以通过命令行启动调度器、传递配置、查看帮助等。
+*/
 // NewSchedulerCommand creates a *cobra.Command object with default parameters and registryOptions
 func NewSchedulerCommand(registryOptions ...Option) *cobra.Command {
+	// 创建调度器的配置对象 opts，包含命令行参数、调度策略、配置文件路径等。
+	// 如果初始化失败，程序会直接崩溃（klog.Fatalf）
 	opts, err := options.NewOptions()
 	if err != nil {
 		klog.Fatalf("unable to initialize command options: %v", err)
 	}
 
+	// 构建 cobra 命令对象
+	// • Use：命令的名称（即 kube-scheduler）
+	// • Long：长描述（可用于 --help 查看）
+	// • Run：实际执行命令的逻辑，调用 runCommand() 启动调度器
+	// • Args：参数校验逻辑（这里禁止传任何非 flag 参数）
 	cmd := &cobra.Command{
 		Use: "kube-scheduler",
 		Long: `The Kubernetes scheduler is a control plane process which assigns
@@ -92,6 +101,9 @@ for more information about scheduling and the kube-scheduler component.`,
 			return nil
 		},
 	}
+
+	// 从 opts 中获取参数定义，并绑定到 cmd 上
+	// 添加版本参数、全局参数等：
 	fs := cmd.Flags()
 	namedFlagSets := opts.Flags()
 	verflag.AddFlags(namedFlagSets.FlagSet("global"))
@@ -111,6 +123,8 @@ for more information about scheduling and the kube-scheduler component.`,
 		fmt.Fprintf(cmd.OutOrStdout(), "%s\n\n"+usageFmt, cmd.Long, cmd.UseLine())
 		cliflag.PrintSections(cmd.OutOrStdout(), namedFlagSets, cols)
 	})
+
+	// 设置 config 参数支持的文件类型
 	cmd.MarkFlagFilename("config", "yaml", "yml", "json")
 
 	return cmd

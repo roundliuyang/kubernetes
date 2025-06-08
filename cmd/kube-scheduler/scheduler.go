@@ -30,9 +30,15 @@ import (
 	"k8s.io/kubernetes/cmd/kube-scheduler/app"
 )
 
+// 启动 kube-scheduler 服务，接收命令行参数、初始化运行环境，并执行调度器逻辑，把 Pod 调度到合适的节点上
 func main() {
 	rand.Seed(time.Now().UnixNano())
 
+	// 生成一个 Cobra 命令对象（*cobra.Command），这个对象包括：
+	// • 命令的名称（比如：kube-scheduler）
+	// • 命令行参数定义（flags，例如 --config、--v=4）
+	// • 命令的帮助信息
+	// • 命令的执行逻辑（Run函数）
 	command := app.NewSchedulerCommand()
 
 	// TODO: once we switch everything over to Cobra commands, we can go back to calling
