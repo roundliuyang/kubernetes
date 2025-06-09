@@ -470,7 +470,23 @@ func makeEventRecorder(kubeDeps *kubelet.Dependencies, nodeName types.NodeName) 
 	}
 }
 
+/*
+	这段 run() 函数是 kubelet 启动初始化流程的核心代码，完成了从配置读取、资源管理器初始化，到运行 kubelet 主服务的全链路准备工作。
+	通过依赖注入的方式解耦了组件，支持灵活配置和功能切换，是 Kubernetes 节点启动过程的关键一环。
+
+	🧩 关键点说明
+	• standaloneMode = true：
+		• 表示 kubelet 不连接 Kubernetes API Server，适用于调试或离线场景。
+	• flock.Acquire() + watchForLockfileContention()：
+		• 提供 inotify 监听机制，监听文件锁争用情况。
+	• Kubelet 是模块化设计：
+		• 每个功能点都注入到 kubeDeps 里，比如 Cloud、Auth、CAdvisor、ContainerManager。
+	• ContainerManager 是资源管理核心：
+		• 包括：Node Allocatable、ReservedCpus、Eviction、QOS Reserved 等等。
+*/
 func run(ctx context.Context, s *options.KubeletServer, kubeDeps *kubelet.Dependencies, featureGate featuregate.FeatureGate) (err error) {
+
+	// 设置和验证 feature gate（功能开关），后续模块依赖于这些开关是否启用
 	// Set global feature gates based on the value on the initial KubeletServer
 	err = utilfeature.DefaultMutableFeatureGate.SetFromMap(s.KubeletConfiguration.FeatureGates)
 	if err != nil {
@@ -488,6 +504,7 @@ func run(ctx context.Context, s *options.KubeletServer, kubeDeps *kubelet.Depend
 	// done channel，用来通知运行结束
 	done := make(chan struct{})
 	if s.LockFilePath != "" {
+		// 防止多个 Kubelet 实例竞争资源（尤其是针对相同的数据目录或端口）
 		klog.Infof("acquiring file lock on %q", s.LockFilePath)
 		if err := flock.Acquire(s.LockFilePath); err != nil {
 			return fmt.Errorf("unable to acquire file lock on %q: %v", s.LockFilePath, err)
@@ -500,7 +517,7 @@ func run(ctx context.Context, s *options.KubeletServer, kubeDeps *kubelet.Depend
 		}
 	}
 
-	// 注册到configz模块
+	// 注册 /configz 配置查看接口，控制是否显示隐藏指标
 	// Register current configuration with /configz endpoint
 	err = initConfigz(&s.KubeletConfiguration)
 	if err != nil {
@@ -511,6 +528,8 @@ func run(ctx context.Context, s *options.KubeletServer, kubeDeps *kubelet.Depend
 		metrics.SetShowHidden()
 	}
 
+	// 是否是独立运行模式 standaloneMode
+	// 判断是否使用 kubeconfig 与 API Server 通信
 	// About to get clients and such, detect standaloneMode
 	standaloneMode := true
 	if len(s.KubeConfig) > 0 {
@@ -518,6 +537,8 @@ func run(ctx context.Context, s *options.KubeletServer, kubeDeps *kubelet.Depend
 	}
 
 	if kubeDeps == nil {
+		// 依赖项初始化（kubeDeps）
+		// • 包含 Kubelet 所需的各种依赖项，如 Client、Cloud、CAdvisor、ContainerManager、EventRecorder 等
 		kubeDeps, err = UnsecuredDependencies(s, featureGate)
 		if err != nil {
 			return err
@@ -568,6 +589,8 @@ func run(ctx context.Context, s *options.KubeletServer, kubeDeps *kubelet.Depend
 		}
 		kubeDeps.OnHeartbeatFailure = closeAllConns
 
+		// Client 初始化：KubeClient、EventClient、HeartbeatClient
+		// 如果不是 standalone 模式，需初始化访问 Kubernetes API 的客户端。
 		kubeDeps.KubeClient, err = clientset.NewForConfig(clientConfig)
 		if err != nil {
 			return fmt.Errorf("failed to initialize kubelet client: %v", err)
@@ -599,6 +622,7 @@ func run(ctx context.Context, s *options.KubeletServer, kubeDeps *kubelet.Depend
 	}
 
 	if kubeDeps.Auth == nil {
+		// 构建身份认证和鉴权模块，处理 webhook/token/bootstrap等多种认证方式
 		auth, runAuthenticatorCAReload, err := BuildAuth(nodeName, kubeDeps.KubeClient, s.KubeletConfiguration)
 		if err != nil {
 			return err
@@ -607,7 +631,9 @@ func run(ctx context.Context, s *options.KubeletServer, kubeDeps *kubelet.Depend
 		runAuthenticatorCAReload(ctx.Done())
 	}
 
-	// cgroup 相关初始化
+	// CAdvisor 和 Cgroup 相关设置
+	// • Cgroup 路径、Kubelet/Runtime/系统级别的资源隔离控制
+	// • CAdvisor 提供系统和容器资源统计。
 	var cgroupRoots []string
 	nodeAllocatableRoot := cm.NodeAllocatableRoot(s.CgroupRoot, s.CgroupsPerQOS, s.CgroupDriver)
 	cgroupRoots = append(cgroupRoots, nodeAllocatableRoot)
@@ -639,6 +665,7 @@ func run(ctx context.Context, s *options.KubeletServer, kubeDeps *kubelet.Depend
 		}
 	}
 
+	// EventRecorder 设置
 	// Setup event recorder if required.
 	makeEventRecorder(kubeDeps, nodeName)
 
@@ -715,6 +742,7 @@ func run(ctx context.Context, s *options.KubeletServer, kubeDeps *kubelet.Depend
 		devicePluginEnabled := utilfeature.DefaultFeatureGate.Enabled(features.DevicePlugins)
 
 		// ContainerManager的实例化
+		// • 包括 CPU 管理、Topology 管理、内存、eviction 策略等
 		kubeDeps.ContainerManager, err = cm.NewContainerManager(
 			kubeDeps.Mounter,
 			kubeDeps.CAdvisorInterface,
@@ -755,20 +783,21 @@ func run(ctx context.Context, s *options.KubeletServer, kubeDeps *kubelet.Depend
 		}
 	}
 
+	// 权限检查
 	if err := checkPermissions(); err != nil {
 		klog.Error(err)
 	}
 
 	utilruntime.ReallyCrash = s.ReallyCrashForTesting
 
-	// 内存OOM相关
+	// OOM Score 设置
 	// TODO(vmarmol): Do this through container config.
 	oomAdjuster := kubeDeps.OOMAdjuster
 	if err := oomAdjuster.ApplyOOMScoreAdj(0, int(s.OOMScoreAdj)); err != nil {
 		klog.Warning(err)
 	}
 
-	// 预初始化Runtime
+	// Runtime 服务预初始化
 	err = kubelet.PreInitRuntimeService(&s.KubeletConfiguration,
 		kubeDeps, &s.ContainerRuntimeOptions,
 		s.ContainerRuntime,
@@ -780,6 +809,7 @@ func run(ctx context.Context, s *options.KubeletServer, kubeDeps *kubelet.Depend
 		return err
 	}
 
+	// 真正启动 Kubelet 主循环
 	if err := RunKubelet(s, kubeDeps, s.RunOnce); err != nil {
 		return err
 	}
@@ -1077,6 +1107,16 @@ func setContentTypeForClient(cfg *restclient.Config, contentType string) {
 	}
 }
 
+/*
+	创建并启动一个 Kubelet 实例，这是 Kubernetes 中负责管理本地节点 Pod 和容器生命周期的核心组件
+	参数说明：
+		• kubeServer: 包含 Kubelet 的配置参数（如主机名、运行时类型、Root 路径、注册选项等）。
+		• kubeDeps: Kubelet 的依赖项集合，比如容器运行时、事件记录器、cAdvisor 等。
+		• runOnce: 如果为 true，Kubelet 只运行一次，处理当前 Pod 后退出，主要用于测试或单次执行场景。
+
+
+
+*/
 // RunKubelet is responsible for setting up and running a kubelet.  It is used in three different applications:
 //
 //	1 Integration tests
@@ -1085,32 +1125,39 @@ func setContentTypeForClient(cfg *restclient.Config, contentType string) {
 //
 // Eventually, #2 will be replaced with instances of #3
 func RunKubelet(kubeServer *options.KubeletServer, kubeDeps *kubelet.Dependencies, runOnce bool) error {
-	// 获取节点信息
+	// 使用 HostnameOverride 或本地系统名确定节点名
 	hostname, err := nodeutil.GetHostname(kubeServer.HostnameOverride)
 	if err != nil {
 		return err
 	}
+	// 如果配置了云提供商（cloud provider），使用它来获取逻辑节点名；否则用主机名。
 	// Query the cloud provider for our node name, default to hostname if kubeDeps.Cloud == nil
 	nodeName, err := getNodeName(kubeDeps.Cloud, hostname)
 	if err != nil {
 		return err
 	}
 	hostnameOverridden := len(kubeServer.HostnameOverride) > 0
+
+	// 初始化事件记录器
 	// Setup event recorder if required.
 	makeEventRecorder(kubeDeps, nodeName)
 
+	// 初始化权限能力（如是否允许特权容器）
 	capabilities.Initialize(capabilities.Capabilities{
 		AllowPrivileged: true,
 	})
 
+	// 设置 Docker 凭据路径（如果需要）
 	credentialprovider.SetPreferredDockercfgPath(kubeServer.RootDirectory)
 	klog.V(2).Infof("Using root directory: %v", kubeServer.RootDirectory)
 
 	if kubeDeps.OSInterface == nil {
+		// 确保 OS 接口已设置
 		kubeDeps.OSInterface = kubecontainer.RealOS{}
 	}
 
 	// 创建并初始化 kubelet
+	// 这是关键步骤，调用底层的 NewMainKubelet 构造出核心的 kubelet.Kubelet 对象
 	k, err := createAndInitKubelet(&kubeServer.KubeletConfiguration,
 		kubeDeps,
 		&kubeServer.ContainerRuntimeOptions,
@@ -1143,6 +1190,7 @@ func RunKubelet(kubeServer *options.KubeletServer, kubeDeps *kubelet.Dependencie
 		return fmt.Errorf("failed to create kubelet: %v", err)
 	}
 
+	// 校验 Pod 配置已初始化
 	// NewMainKubelet should have set up a pod source config if one didn't exist
 	// when the builder was run. This is just a precaution.
 	if kubeDeps.PodConfig == nil {
@@ -1150,10 +1198,12 @@ func RunKubelet(kubeServer *options.KubeletServer, kubeDeps *kubelet.Dependencie
 	}
 	podCfg := kubeDeps.PodConfig
 
+	// 设置最大文件打开数（rlimit）
 	if err := rlimit.SetNumFiles(uint64(kubeServer.MaxOpenFiles)); err != nil {
 		klog.Errorf("Failed to set rlimit on max file handles: %v", err)
 	}
 
+	// runOnce = true → 执行一次 k.RunOnce()，主要用于测试
 	// process pods and exit.
 	if runOnce {
 		if _, err := k.RunOnce(podCfg.Updates()); err != nil {
