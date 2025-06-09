@@ -329,6 +329,9 @@ func PreInitRuntimeService(kubeCfg *kubeletconfiginternal.KubeletConfiguration,
 	return nil
 }
 
+/*
+	构造一个 Kubelet 实例，配置好所有内部依赖模块，为后续的 Run() 或 Start() 调用做准备
+*/
 // NewMainKubelet instantiates a new Kubelet object along with all the required internal modules.
 // No initialization of Kubelet and its modules should happen here.
 func NewMainKubelet(kubeCfg *kubeletconfiginternal.KubeletConfiguration,
