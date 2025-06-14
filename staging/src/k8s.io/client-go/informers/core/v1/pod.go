@@ -66,12 +66,14 @@ func NewFilteredPodInformer(client kubernetes.Interface, namespace string, resyn
 				if tweakListOptions != nil {
 					tweakListOptions(&options)
 				}
+				// 调用apiserver获取pod列表
 				return client.CoreV1().Pods(namespace).List(context.TODO(), options)
 			},
 			WatchFunc: func(options metav1.ListOptions) (watch.Interface, error) {
 				if tweakListOptions != nil {
 					tweakListOptions(&options)
 				}
+				// 调用apiserver监控pod列表
 				return client.CoreV1().Pods(namespace).Watch(context.TODO(), options)
 			},
 		},
@@ -82,11 +84,12 @@ func NewFilteredPodInformer(client kubernetes.Interface, namespace string, resyn
 }
 
 func (f *podInformer) defaultInformer(client kubernetes.Interface, resyncPeriod time.Duration) cache.SharedIndexInformer {
+	// 创建informer
 	return NewFilteredPodInformer(client, f.namespace, resyncPeriod, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc}, f.tweakListOptions)
 }
 
-// 最后，我们可以看到podInformer调用了InformerFor函数进行了添加
 func (f *podInformer) Informer() cache.SharedIndexInformer {
+	// 入上面定义的defaultInformer方法，用于创建informer
 	return f.factory.InformerFor(&corev1.Pod{}, f.defaultInformer)
 }
 

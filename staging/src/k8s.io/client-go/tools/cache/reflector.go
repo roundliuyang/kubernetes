@@ -200,6 +200,10 @@ func (r *Reflector) setExpectedType(expectedType interface{}) {
 // call chains to NewReflector, so they'd be low entropy names for reflectors
 var internalPackages = []string{"client-go/tools/cache/"}
 
+/*
+	Run 方法会反复使用 reflector 的 ListAndWatch 方法来获取所有对象以及后续的变更（delta）。
+	当 stopCh 被关闭时，Run 将会退出
+*/
 // Run repeatedly uses the reflector's ListAndWatch to fetch all the
 // objects and subsequent deltas.
 // Run will exit when stopCh is closed.
@@ -223,6 +227,12 @@ var (
 	errorStopRequested = errors.New("Stop requested")
 )
 
+/*
+	调用listerWatcher.List方法，获取资源下的所有对象的数据，这个方法会通过api调用到apiServer获取资源列表，代码我在上面已经贴出来了；
+	调用listMetaInterface.GetResourceVersion获取资源版本号；
+	调用meta.ExtractList方法将资源数据转换成资源对象列表；
+	将资源对象列表中的资源对象和资源版本号存储至DeltaFIFO队列中
+*/
 // resyncChan returns a channel which will receive something when a resync is
 // required, and a cleanup function.
 func (r *Reflector) resyncChan() (<-chan time.Time, func() bool) {
@@ -263,6 +273,7 @@ func (r *Reflector) ListAndWatch(stopCh <-chan struct{}) error {
 			// Attempt to gather list in chunks, if supported by listerWatcher, if not, the first
 			// list request will return the full response.
 			pager := pager.New(pager.SimplePageFunc(func(opts metav1.ListOptions) (runtime.Object, error) {
+				// 根据参数获取pod 列表
 				return r.listerWatcher.List(opts)
 			}))
 			switch {
@@ -332,17 +343,24 @@ func (r *Reflector) ListAndWatch(stopCh <-chan struct{}) error {
 		if err != nil {
 			return fmt.Errorf("unable to understand list result %#v: %v", list, err)
 		}
+
+		// 获取资源版本号
 		resourceVersion = listMetaInterface.GetResourceVersion()
 		initTrace.Step("Resource version extracted")
+		// 将资源数据转换成资源对象列表
 		items, err := meta.ExtractList(list)
 		if err != nil {
 			return fmt.Errorf("unable to understand list result %#v (%v)", list, err)
 		}
 		initTrace.Step("Objects extracted")
+
+		// 将资源对象列表中的资源对象和资源版本号存储至DeltaFIFO队列中
 		if err := r.syncWith(items, resourceVersion); err != nil {
 			return fmt.Errorf("unable to sync list result: %v", err)
 		}
 		initTrace.Step("SyncWith done")
+
+		// 更新资源版本号
 		r.setLastSyncResourceVersion(resourceVersion)
 		initTrace.Step("Resource version updated")
 		return nil
@@ -378,6 +396,7 @@ func (r *Reflector) ListAndWatch(stopCh <-chan struct{}) error {
 		}
 	}()
 
+	// 这里会循环调用clientset客户端api与apiServer建立长连接，监控指定资源的变更，如果监控到有资源变更，那么会调用watchHandler处理资源的变更事件
 	for {
 		// give the stopCh a chance to stop the loop, even in case of continue statements further down on errors
 		select {
@@ -400,6 +419,7 @@ func (r *Reflector) ListAndWatch(stopCh <-chan struct{}) error {
 
 		// start the clock before sending the request, since some proxies won't flush headers until after the first watch event is sent
 		start := r.clock.Now()
+		// 调用clientset客户端api与apiServer建立长连接，监控指定资源的变更
 		w, err := r.listerWatcher.Watch(options)
 		if err != nil {
 			// If this is "connection refused" error, it means that most likely apiserver is not responsive.
@@ -413,6 +433,7 @@ func (r *Reflector) ListAndWatch(stopCh <-chan struct{}) error {
 			return err
 		}
 
+		// 处理资源的变更事件
 		if err := r.watchHandler(start, w, &resourceVersion, resyncerrc, stopCh); err != nil {
 			if err != errorStopRequested {
 				switch {
@@ -439,6 +460,7 @@ func (r *Reflector) syncWith(items []runtime.Object, resourceVersion string) err
 	return r.store.Replace(found, resourceVersion)
 }
 
+// watchHandler方法会根据传入的资源类型调用不同的方法转换成不同的Delta然后存入到DeltaFIFO队列中
 // watchHandler watches w and keeps *resourceVersion up to date.
 func (r *Reflector) watchHandler(start time.Time, w watch.Interface, resourceVersion *string, errc chan error, stopCh <-chan struct{}) error {
 	eventCount := 0
@@ -482,19 +504,22 @@ loop:
 				utilruntime.HandleError(fmt.Errorf("%s: unable to understand watch event %#v", r.name, event))
 				continue
 			}
+			// 获取资源版本号
 			newResourceVersion := meta.GetResourceVersion()
 			switch event.Type {
-			// 增删改三种Event，分别对应到去store，即DeltaFIFO中，操作object
+			// 将添加资源事件添加到DeltaFIFO队列中
 			case watch.Added:
 				err := r.store.Add(event.Object)
 				if err != nil {
 					utilruntime.HandleError(fmt.Errorf("%s: unable to add watch event object (%#v) to store: %v", r.name, event.Object, err))
 				}
+			// 将更新资源事件添加到DeltaFIFO队列中
 			case watch.Modified:
 				err := r.store.Update(event.Object)
 				if err != nil {
 					utilruntime.HandleError(fmt.Errorf("%s: unable to update watch event object (%#v) to store: %v", r.name, event.Object, err))
 				}
+				// 将删除资源事件添加到DeltaFIFO队列中
 			case watch.Deleted:
 				// TODO: Will any consumers need access to the "last known
 				// state", which is passed in event.Object? If so, may need

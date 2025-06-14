@@ -195,7 +195,7 @@ func NewSharedInformer(lw ListerWatcher, exampleObject runtime.Object, defaultEv
 	return NewSharedIndexInformer(lw, exampleObject, defaultEventHandlerResyncPeriod, Indexers{})
 }
 
-// 分发process的创建
+// sharedIndexInformer里面会创建sharedProcessor，设置List&Watch的回调函数，创建indexer
 // NewSharedIndexInformer creates a new instance for the listwatcher.
 // The created informer will not do resyncs if the given
 // defaultEventHandlerResyncPeriod is zero.  Otherwise: for each
@@ -367,30 +367,32 @@ func (s *sharedIndexInformer) SetWatchErrorHandler(handler WatchErrorHandler) er
 	return nil
 }
 
-// 在上面，我们看到了异步运行Informer的代码 go informer.Run(stopCh)，我们看看是怎么run的
 func (s *sharedIndexInformer) Run(stopCh <-chan struct{}) {
 	defer utilruntime.HandleCrash()
 
-	// 这里有个 DeltaFIFO 的对象
+	// 初始化DeltaFIFO队列
 	fifo := NewDeltaFIFOWithOptions(DeltaFIFOOptions{
 		KnownObjects:          s.indexer,
 		EmitDeltaTypeReplaced: true,
 	})
 
-	// 传入这个fifo到cfg, 然后去查一下 PopProcessFunc 的定义，在创建controller前
 	cfg := &Config{
-		Queue:            fifo,
-		ListerWatcher:    s.listerWatcher,
-		ObjectType:       s.objectType,
+		// 设置Queue为DeltaFIFO队列
+		Queue: fifo,
+		// 设置List&Watch的回调函数
+		ListerWatcher: s.listerWatcher,
+		ObjectType:    s.objectType,
+		// 设置Resync周期
 		FullResyncPeriod: s.resyncCheckPeriod,
 		RetryOnError:     false,
-		ShouldResync:     s.processor.shouldResync,
+		// 判断有哪些监听器到期需要被Resync
+		ShouldResync: s.processor.shouldResync,
 
 		Process:           s.HandleDeltas,
 		WatchErrorHandler: s.watchErrorHandler,
 	}
 
-	// 新建controller
+	// 异步创建controller
 	func() {
 		s.startedLock.Lock()
 		defer s.startedLock.Unlock()
@@ -406,6 +408,7 @@ func (s *sharedIndexInformer) Run(stopCh <-chan struct{}) {
 	defer wg.Wait()              // Wait for Processor to stop
 	defer close(processorStopCh) // Tell Processor to stop
 	wg.StartWithChannel(processorStopCh, s.cacheMutationDetector.Run)
+	// 调用run方法启动processor
 	wg.StartWithChannel(processorStopCh, s.processor.run)
 
 	defer func() {
@@ -413,6 +416,7 @@ func (s *sharedIndexInformer) Run(stopCh <-chan struct{}) {
 		defer s.startedLock.Unlock()
 		s.stopped = true // Don't want any new listeners
 	}()
+	// 启动controller
 	s.controller.Run(stopCh)
 }
 
@@ -509,13 +513,16 @@ func (s *sharedIndexInformer) AddEventHandlerWithResyncPeriod(handler ResourceEv
 		}
 	}
 
+	// 初始化监听器
 	listener := newProcessListener(handler, resyncPeriod, determineResyncPeriod(resyncPeriod, s.resyncCheckPeriod), s.clock.Now(), initialBufferSize)
 
+	// 如果informer还没启动，那么直接将监听器加入到processor监听器列表中
 	if !s.started {
 		s.processor.addListener(listener)
 		return
 	}
 
+	// 如果informer已经启动，那么需要加锁
 	// in order to safely join, we have to
 	// 1. stop sending add/update/delete notifications
 	// 2. do a list against the store
@@ -524,25 +531,31 @@ func (s *sharedIndexInformer) AddEventHandlerWithResyncPeriod(handler ResourceEv
 	s.blockDeltas.Lock()
 	defer s.blockDeltas.Unlock()
 
+	// 然后将indexer中缓存的数据写入到listener中
 	s.processor.addListener(listener)
 	for _, item := range s.indexer.List() {
+		// listener.add方法会调用processorListener的add方法，这个方法会将数据写入到addCh管道
 		listener.add(addNotification{newObj: item})
 	}
 }
 
+/*
+HandleDeltas会与indexer缓存交互更新我们从Delta FIFO中取到的内容，之后通过s.processor.distribute()进行消息的分发。
+*/
 func (s *sharedIndexInformer) HandleDeltas(obj interface{}) error {
 	s.blockDeltas.Lock()
 	defer s.blockDeltas.Unlock()
 
+	// 根据obj的Type类型进行分发
 	// from oldest to newest
 	for _, d := range obj.(Deltas) {
 		switch d.Type {
 		// 增、改、替换、同步
 		case Sync, Replaced, Added, Updated:
 			s.cacheMutationDetector.AddObject(d.Object)
-			// 先去indexer查询
+			// 如果缓存中存在该对象
 			if old, exists, err := s.indexer.Get(d.Object); err == nil && exists {
-				// 如果数据已经存在，就执行Update逻辑
+				// 更新indexr
 				if err := s.indexer.Update(d.Object); err != nil {
 					return err
 				}
@@ -553,6 +566,7 @@ func (s *sharedIndexInformer) HandleDeltas(obj interface{}) error {
 					// Sync events are only propagated to listeners that requested resync
 					isSync = true
 				case d.Type == Replaced:
+					// 新老对象获取版本号进行比较
 					if accessor, err := meta.Accessor(d.Object); err == nil {
 						if oldAccessor, err := meta.Accessor(old); err == nil {
 							// Replaced events that didn't change resourceVersion are treated as resync events
@@ -564,7 +578,7 @@ func (s *sharedIndexInformer) HandleDeltas(obj interface{}) error {
 				// 分发Update事件
 				s.processor.distribute(updateNotification{oldObj: old, newObj: d.Object}, isSync)
 			} else {
-				// 没查到数据，就执行Add操作
+				// 如果缓存中不存在该对象
 				if err := s.indexer.Add(d.Object); err != nil {
 					return err
 				}
@@ -617,7 +631,7 @@ func (p *sharedProcessor) addListenerLocked(listener *processorListener) {
 	p.syncingListeners = append(p.syncingListeners, listener)
 }
 
-// 查看distribute函数
+// sharedProcesser通过listener.add(obj)向每个listener分发该object。而该函数中又执行了p.addCh <- notification
 func (p *sharedProcessor) distribute(obj interface{}, sync bool) {
 	p.listenersLock.RLock()
 	defer p.listenersLock.RUnlock()
@@ -638,7 +652,9 @@ func (p *sharedProcessor) run(stopCh <-chan struct{}) {
 	func() {
 		p.listenersLock.RLock()
 		defer p.listenersLock.RUnlock()
+		// 遍历监听器
 		for _, listener := range p.listeners {
+			// run方法会调用processorListener的run方法和pop方法，这两个方法合在一起完成了事件回调
 			p.wg.Start(listener.run)
 			p.wg.Start(listener.pop)
 		}
@@ -747,11 +763,16 @@ func newProcessListener(handler ResourceEventHandler, requestedResyncPeriod, res
 	return ret
 }
 
-// 这个add的操作是利用了channel
+// 这里可以结合上面的p.wg.Start(listener.run)和p.wg.Start(listener.pop)方法来进行理解，这里将notification传入到addCh管道之后会触发EventHandler事件
 func (p *processorListener) add(notification interface{}) {
 	p.addCh <- notification
 }
 
+/*
+pop方法在select代码块中会获取addCh管道中的数据，第一个循环的时候notification是nil，所以会将nextCh设置为p.nextCh；
+第二个循环的时候会将数据写入到nextCh中。
+当notification不为空的时候是直接将数据存入pendingNotifications缓存中的，取也是从pendingNotifications中读取
+*/
 func (p *processorListener) pop() {
 	defer utilruntime.HandleCrash()
 	defer close(p.nextCh) // Tell .run() to stop
@@ -782,6 +803,9 @@ func (p *processorListener) pop() {
 	}
 }
 
+/*
+run每秒遍历一次nextCh中的数据，然后根据不同的notification类型执行不同的回调方法，这里会回调到我们在main方法中注册的eventHandler
+*/
 func (p *processorListener) run() {
 	// this call blocks until the channel is closed.  When a panic happens during the notification
 	// we will catch it, **the offending item will be skipped!**, and after a short delay (one second)

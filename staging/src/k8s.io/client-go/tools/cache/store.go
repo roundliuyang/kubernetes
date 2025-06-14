@@ -257,6 +257,8 @@ func NewStore(keyFunc KeyFunc) Store {
 	}
 }
 
+// NewIndexer方法创建了一个cache，它的keyFunc是DeletionHandlingMetaNamespaceKeyFunc，即接受一个object，生成它的namepace/name的字符串。
+// cache里面的数据会存放到cacheStorage中，它是一个threadSafeMap用来存储资源对象并自带索引功能的本地存储。
 // NewIndexer returns an Indexer implemented simply with a map and a lock.
 func NewIndexer(keyFunc KeyFunc, indexers Indexers) Indexer {
 	return &cache{

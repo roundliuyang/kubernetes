@@ -90,6 +90,7 @@ type controller struct {
 	clock          clock.Clock
 }
 
+// Controller 是一个底层控制器，它由一个 Config 参数化，并被 sharedIndexInformer 使用
 // Controller is a low-level controller that is parameterized by a
 // Config and used in sharedIndexInformer.
 type Controller interface {
@@ -118,7 +119,9 @@ func New(c *Config) Controller {
 	return ctlr
 }
 
-// Controller的运行
+/*
+	这里对应Informer运行原理里面Informer上部分创建Reflector并进行监听，和下部分循环调用DeltaFIFO队列的pop方法进行分发
+*/
 // Run begins processing items, and will continue until a value is sent down stopCh or it is closed.
 // It's an error to call Run more than once.
 // Run blocks; call via go.
@@ -128,7 +131,7 @@ func (c *controller) Run(stopCh <-chan struct{}) {
 		<-stopCh
 		c.config.Queue.Close()
 	}()
-	// 我们再回头看看这个Reflect结构
+	// 创建Reflector
 	r := NewReflector(
 		// ListerWatcher 我们已经有了解，就是通过client监听kube-apiserver暴露出来的Resource
 		c.config.ListerWatcher,
@@ -149,10 +152,10 @@ func (c *controller) Run(stopCh <-chan struct{}) {
 
 	var wg wait.Group
 
-	// 生产，往Queue里放数据
+	// 启动Reflector，生产，往Queue里放数据
 	wg.StartWithChannel(stopCh, r.Run)
 
-	// 消费，从Queue消费数据
+	// 每秒中循环调用DeltaFIFO队列的pop方法， 消费，从Queue消费数据
 	wait.Until(c.processLoop, time.Second, stopCh)
 	wg.Wait()
 }
