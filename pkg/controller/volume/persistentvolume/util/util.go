@@ -148,6 +148,7 @@ func GetBindVolumeToClaim(volume *v1.PersistentVolume, claim *v1.PersistentVolum
 	return volumeClone, dirty, nil
 }
 
+// 校验相应字段是否相等，如果不相等则返回false，说明PV绑定了其他PVC，等待下次循环再重试
 // IsVolumeBoundToClaim returns true, if given volume is pre-bound or bound
 // to specific claim. Both claim.Name and claim.Namespace must be equal.
 // If claim.UID is present in volume.Spec.ClaimRef, it must be equal too.

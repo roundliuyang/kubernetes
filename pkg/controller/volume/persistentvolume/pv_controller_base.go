@@ -200,6 +200,8 @@ func (ctrl *PersistentVolumeController) storeClaimUpdate(claim interface{}) (boo
 // updateVolume runs in worker thread and handles "volume added",
 // "volume updated" and "periodic sync" events.
 func (ctrl *PersistentVolumeController) updateVolume(volume *v1.PersistentVolume) {
+
+	// 更新缓存
 	// Store the new volume version in the cache and do not process it if this
 	// is an old version.
 	new, err := ctrl.storeVolumeUpdate(volume)
@@ -210,6 +212,7 @@ func (ctrl *PersistentVolumeController) updateVolume(volume *v1.PersistentVolume
 		return
 	}
 
+	// 核心方法，根据当前 PV 对象的规格对 PV 和 PVC 进行绑定或者解绑
 	err = ctrl.syncVolume(volume)
 	if err != nil {
 		if errors.IsConflict(err) {
@@ -294,6 +297,10 @@ func (ctrl *PersistentVolumeController) deleteClaim(claim *v1.PersistentVolumeCl
 	ctrl.volumeQueue.Add(volumeName)
 }
 
+/*
+	这个代码主要就是起了三个Goroutine，分别运行不同的方法。resync方法十分简单，
+	主要作用是找出pv和pvc列表然后放入到队列volumeQueue和claimQueue中，给volumeWorker和claimWorker进行消费。
+*/
 // Run starts all of this controller's control loops
 func (ctrl *PersistentVolumeController) Run(stopCh <-chan struct{}) {
 	defer utilruntime.HandleCrash()
@@ -401,6 +408,7 @@ func updateMigrationAnnotations(cmpm CSIMigratedPluginManager, translator CSINam
 	return false
 }
 
+// volumeWorker会不断循环消费volumeQueue队列里面的数据，然后获取到相应的PV执行updateVolume操作
 // volumeWorker processes items from volumeQueue. It must run only once,
 // syncVolume is not assured to be reentrant.
 func (ctrl *PersistentVolumeController) volumeWorker() {
