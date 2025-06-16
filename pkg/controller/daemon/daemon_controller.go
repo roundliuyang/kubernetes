@@ -808,17 +808,21 @@ func (dsc *DaemonSetsController) podsShouldBeOnNode(
 	ds *apps.DaemonSet,
 ) (nodesNeedingDaemonPods, podsToDelete []string, err error) {
 
+	// 判断该 node 是否需要运行 daemon pod 以及能不能调度成功
 	shouldRun, shouldContinueRunning, err := dsc.nodeShouldRunDaemonPod(node, ds)
 	if err != nil {
 		return
 	}
 
+	// 获取该节点上的指定ds的pod列表
 	daemonPods, exists := nodeToDaemonPods[node.Name]
 
 	switch {
+	// 如果daemon pod是可以运行在这个node上，但是还没有创建，那么创建一个
 	case shouldRun && !exists:
 		// If daemon pod is supposed to be running on node, but isn't, create daemon pod.
 		nodesNeedingDaemonPods = append(nodesNeedingDaemonPods, node.Name)
+	// 需要 pod 一直运行
 	case shouldContinueRunning:
 		// If a daemon pod failed, delete it
 		// If there's non-daemon pods left on this node, we will create it in the next sync loop
@@ -827,6 +831,7 @@ func (dsc *DaemonSetsController) podsShouldBeOnNode(
 			if pod.DeletionTimestamp != nil {
 				continue
 			}
+			// 如果 pod 运行状态为 failed，则删除该 pod
 			if pod.Status.Phase == v1.PodFailed {
 				// This is a critical place where DS is often fighting with kubelet that rejects pods.
 				// We need to avoid hot looping and backoff.
@@ -853,6 +858,7 @@ func (dsc *DaemonSetsController) podsShouldBeOnNode(
 				daemonPodsRunning = append(daemonPodsRunning, pod)
 			}
 		}
+		// 如果节点上已经运行 daemon pod 数 > 1，保留运行时间最长的 pod，其余的删除
 		// If daemon pod is supposed to be running on node, but more than 1 daemon pod is running, delete the excess daemon pods.
 		// Sort the daemon pods by creation time, so the oldest is preserved.
 		if len(daemonPodsRunning) > 1 {
@@ -861,6 +867,7 @@ func (dsc *DaemonSetsController) podsShouldBeOnNode(
 				podsToDelete = append(podsToDelete, daemonPodsRunning[i].Name)
 			}
 		}
+	//  如果 pod 不需要继续运行但 pod 已存在则需要删除 pod
 	case !shouldContinueRunning && exists:
 		// If daemon pod isn't supposed to run on node, but it is, delete all daemon pods on node.
 		for _, pod := range daemonPods {
@@ -874,17 +881,23 @@ func (dsc *DaemonSetsController) podsShouldBeOnNode(
 	return nodesNeedingDaemonPods, podsToDelete, nil
 }
 
+/*
+	manage方法里面首先会获取daemon pod 与 node 的映射关系，然后判断每一个 node 是否需要运行 daemon pod，
+	然后遍历完node之后将需要创建的Pod列表和需要删除Pod的列表交给syncNodes执行
+*/
 // manage manages the scheduling and running of Pods of ds on nodes.
 // After figuring out which nodes should run a Pod of ds but not yet running one and
 // which nodes should not run a Pod of ds but currently running one, it calls function
 // syncNodes with a list of pods to remove and a list of nodes to run a Pod of ds.
 func (dsc *DaemonSetsController) manage(ds *apps.DaemonSet, nodeList []*v1.Node, hash string) error {
+	// 获取已存在 daemon pod 与 node 的映射关系
 	// Find out the pods which are created for the nodes by DaemonSet.
 	nodeToDaemonPods, err := dsc.getNodesToDaemonPods(ds)
 	if err != nil {
 		return fmt.Errorf("couldn't get node to daemon pod mapping for daemon set %q: %v", ds.Name, err)
 	}
 
+	// 判断每一个 node 是否需要运行 daemon pod
 	// For each node, if the node is running the daemon pod but isn't supposed to, kill the daemon
 	// pod. If the node is supposed to run the daemon pod, but isn't, create the daemon pod on the node.
 	var nodesNeedingDaemonPods, podsToDelete []string
@@ -896,6 +909,7 @@ func (dsc *DaemonSetsController) manage(ds *apps.DaemonSet, nodeList []*v1.Node,
 			continue
 		}
 
+		// 将需要删除的Pod和需要在某个节点创建Pod存入列表中
 		nodesNeedingDaemonPods = append(nodesNeedingDaemonPods, nodesNeedingDaemonPodsOnNode...)
 		podsToDelete = append(podsToDelete, podsToDeleteOnNode...)
 	}
@@ -904,6 +918,7 @@ func (dsc *DaemonSetsController) manage(ds *apps.DaemonSet, nodeList []*v1.Node,
 	// If node doesn't exist then pods are never scheduled and can't be deleted by PodGCController.
 	podsToDelete = append(podsToDelete, getUnscheduledPodsWithoutNode(nodeList, nodeToDaemonPods)...)
 
+	// 为对应的 node 创建 daemon pod 以及删除多余的 pods
 	// Label new pods using the hash label value of the current history when creating them
 	if err = dsc.syncNodes(ds, podsToDelete, nodesNeedingDaemonPods, hash); err != nil {
 		return err
@@ -1216,10 +1231,10 @@ func (dsc *DaemonSetsController) syncDaemonSet(key string) error {
 
 // nodeShouldRunDaemonPod checks a set of preconditions against a (node,daemonset) and returns a
 // summary. Returned booleans are:
-// * shouldRun:
+//   - shouldRun:
 //     Returns true when a daemonset should run on the node if a daemonset pod is not already
 //     running on that node.
-// * shouldContinueRunning:
+//   - shouldContinueRunning:
 //     Returns true when a daemonset should continue running on a node if a daemonset pod is already
 //     running on that node.
 func (dsc *DaemonSetsController) nodeShouldRunDaemonPod(node *v1.Node, ds *apps.DaemonSet) (bool, bool, error) {
