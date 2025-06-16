@@ -275,7 +275,8 @@ func (ssc *StatefulSetController) deletePod(obj interface{}) {
 // It also reconciles ControllerRef by adopting/orphaning.
 //
 // NOTE: Returned Pods are pointers to objects from the cache.
-//       If you need to modify one, you need to copy it first.
+//
+//	If you need to modify one, you need to copy it first.
 func (ssc *StatefulSetController) getPodsForStatefulSet(set *apps.StatefulSet, selector labels.Selector) ([]*v1.Pod, error) {
 	// List all pods to include the pods that don't match the selector anymore but
 	// has a ControllerRef pointing to this StatefulSet.
@@ -424,6 +425,7 @@ func (ssc *StatefulSetController) sync(key string) error {
 		return err
 	}
 
+	// 获取选择器
 	selector, err := metav1.LabelSelectorAsSelector(set.Spec.Selector)
 	if err != nil {
 		utilruntime.HandleError(fmt.Errorf("error converting StatefulSet %v selector: %v", key, err))
@@ -435,11 +437,13 @@ func (ssc *StatefulSetController) sync(key string) error {
 		return err
 	}
 
+	// 根据选择器拿到对应的pod列表
 	pods, err := ssc.getPodsForStatefulSet(set, selector)
 	if err != nil {
 		return err
 	}
 
+	// 往下执行sync操作
 	return ssc.syncStatefulSet(set, pods)
 }
 
