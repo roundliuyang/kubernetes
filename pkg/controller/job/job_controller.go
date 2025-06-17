@@ -463,11 +463,13 @@ func (jm *Controller) syncJob(key string) (bool, error) {
 	// make a copy so we don't mutate the shared cache
 	job := *sharedJob.DeepCopy()
 
+	// 如果job已经跑完了，那么直接返回，避免重跑
 	// if job was finished previously, we don't want to redo the termination
 	if IsJobFinished(&job) {
 		return true, nil
 	}
 
+	// 获取job的重试次数
 	// retrieve the previous number of retry
 	previousRetry := jm.queue.NumRequeues(key)
 
@@ -476,15 +478,19 @@ func (jm *Controller) syncJob(key string) (bool, error) {
 	// the store after we've checked the expectation, the job sync is just deferred till the next relist.
 	jobNeedsSync := jm.expectations.SatisfiedExpectations(key)
 
+	// 获取这个job的pod列表
 	pods, err := jm.getPodsForJob(&job)
 	if err != nil {
 		return false, err
 	}
 
+	// 找到这个job中仍然活跃的pod
 	activePods := controller.FilterActivePods(pods)
 	active := int32(len(activePods))
+	// 获取job中运行成功的pod数和运行失败的pod数
 	succeeded, failed := getStatus(pods)
 	conditions := len(job.Status.Conditions)
+	// 设置job 的启动时间
 	// job first start
 	if job.Status.StartTime == nil {
 		now := metav1.Now()
@@ -502,13 +508,17 @@ func (jm *Controller) syncJob(key string) (bool, error) {
 	var failureReason string
 	var failureMessage string
 
+	// failed次数超过了job.Status.Failed说明有新的pod运行失败了
 	jobHaveNewFailure := failed > job.Status.Failed
+
+	//如果有新的pod运行失败，并且活跃的pod不等于并行Parallelism数，并且重试次数超过了BackoffLimit
 	// new failures happen when status does not reflect the failures and active
 	// is different than parallelism, otherwise the previous controller loop
 	// failed updating status so even if we pick up failure it is not a new one
 	exceedsBackoffLimit := jobHaveNewFailure && (active != *job.Spec.Parallelism) &&
 		(int32(previousRetry)+1 > *job.Spec.BackoffLimit)
 
+	// 重试次数是否超标
 	if exceedsBackoffLimit || pastBackoffLimitOnFailure(&job, pods) {
 		// check if the number of pod restart exceeds backoff (for restart OnFailure only)
 		// OR if the number of failed jobs increased since the last syncJob
@@ -516,13 +526,16 @@ func (jm *Controller) syncJob(key string) (bool, error) {
 		failureReason = "BackoffLimitExceeded"
 		failureMessage = "Job has reached the specified backoff limit"
 	} else if pastActiveDeadline(&job) {
+		// job运行时间是否超过了ActiveDeadlineSeconds
 		jobFailed = true
 		failureReason = "DeadlineExceeded"
 		failureMessage = "Job was active longer than specified deadline"
 	}
 
+	// job运行失败
 	if jobFailed {
 		errCh := make(chan error, active)
+		// 将job里面的active的pod删除
 		jm.deleteJobPods(&job, activePods, errCh)
 		select {
 		case manageJobErr = <-errCh:
@@ -532,17 +545,21 @@ func (jm *Controller) syncJob(key string) (bool, error) {
 		default:
 		}
 
+		// 清空active数
 		// update status values accordingly
 		failed += active
 		active = 0
 		job.Status.Conditions = append(job.Status.Conditions, newCondition(batch.JobFailed, failureReason, failureMessage))
 		jm.recorder.Event(&job, v1.EventTypeWarning, failureReason, failureMessage)
 	} else {
+		// 如果job需要同步，并且job没有被删除，则调用manageJob进行同步工作
 		if jobNeedsSync && job.DeletionTimestamp == nil {
 			active, manageJobErr = jm.manageJob(activePods, succeeded, &job)
 		}
+		// 完成数等于pod 运行成功的数量
 		completions := succeeded
 		complete := false
+		// 如果没有设置Completions，那么只要有pod完成，那么job就算完成
 		if job.Spec.Completions == nil {
 			// This type of job is complete when any pod exits with success.
 			// Each pod is capable of
@@ -554,20 +571,24 @@ func (jm *Controller) syncJob(key string) (bool, error) {
 				complete = true
 			}
 		} else {
+			// 如果实际完成数大于或等于Completions
 			// Job specifies a number of completions.  This type of job signals
 			// success by having that number of successes.  Since we do not
 			// start more pods than there are remaining completions, there should
 			// not be any remaining active pods once this count is reached.
 			if completions >= *job.Spec.Completions {
 				complete = true
+				// 如果还有pod处于active状态，发送EventTypeWarning事件
 				if active > 0 {
 					jm.recorder.Event(&job, v1.EventTypeWarning, "TooManyActivePods", "Too many active pods running after completion count reached")
 				}
+				// 如果实际完成数大于Completions，发送EventTypeWarning事件
 				if completions > *job.Spec.Completions {
 					jm.recorder.Event(&job, v1.EventTypeWarning, "TooManySucceededPods", "Too many succeeded pods running after completion count reached")
 				}
 			}
 		}
+		// job完成了则更新 job.Status.Conditions 和 job.Status.CompletionTime 字段
 		if complete {
 			job.Status.Conditions = append(job.Status.Conditions, newCondition(batch.JobComplete, "", ""))
 			now := metav1.Now()
@@ -629,15 +650,22 @@ func (jm *Controller) deleteJobPods(job *batch.Job, pods []*v1.Pod, errCh chan<-
 	wait.Wait()
 }
 
+/*
+	这个方法会校验job的RestartPolicy策略，不是OnFailure才继续往下执行。然后会遍历pod列表，
+	将pod列表中的重启次数累加并与BackoffLimit进行比较，超过了则返回true。
+*/
 // pastBackoffLimitOnFailure checks if container restartCounts sum exceeds BackoffLimit
 // this method applies only to pods with restartPolicy == OnFailure
 func pastBackoffLimitOnFailure(job *batch.Job, pods []*v1.Pod) bool {
+	// 如果RestartPolicy为OnFailure，那么直接返回
 	if job.Spec.Template.Spec.RestartPolicy != v1.RestartPolicyOnFailure {
 		return false
 	}
 	result := int32(0)
 	for i := range pods {
 		po := pods[i]
+		// 如果pod状态为Running或Pending
+		// 获取到pod对应的重启次数以及Container状态，包含pod中的InitContainer
 		if po.Status.Phase == v1.PodRunning || po.Status.Phase == v1.PodPending {
 			for j := range po.Status.InitContainerStatuses {
 				stat := po.Status.InitContainerStatuses[j]
@@ -649,12 +677,15 @@ func pastBackoffLimitOnFailure(job *batch.Job, pods []*v1.Pod) bool {
 			}
 		}
 	}
+	// 如果BackoffLimit等于0，那么只要重启了一次，则返回true
 	if *job.Spec.BackoffLimit == 0 {
 		return result > 0
 	}
+	// 比较重启次数是否超过了BackoffLimit
 	return result >= *job.Spec.BackoffLimit
 }
 
+// 这个方法会算出job的运行时间duration，然后和ActiveDeadlineSeconds进行比较，如果超过了则返回true。
 // pastActiveDeadline checks if job has ActiveDeadlineSeconds field set and if it is exceeded.
 func pastActiveDeadline(job *batch.Job) bool {
 	if job.Spec.ActiveDeadlineSeconds == nil || job.Status.StartTime == nil {
@@ -699,11 +730,18 @@ func (jm *Controller) manageJob(activePods []*v1.Pod, succeeded int32, job *batc
 	}
 
 	var errCh chan error
+	// 如果处于 active 状态的 pods 数大于 job 设置的并发数 job.Spec.Parallelism
 	if active > parallelism {
+		// 多出的个数
 		diff := active - parallelism
 		errCh = make(chan error, diff)
 		jm.expectations.ExpectDeletions(jobKey, int(diff))
 		klog.V(4).Infof("Too many pods running job %q, need %d, deleting %d", jobKey, parallelism, diff)
+
+		// pods 排序，以便可以优先删除一些pod：
+		// 判断 pod 状态：Not ready < ready
+		// 是否已经被调度：unscheduled< scheduled
+		// 判断 pod phase ：pending < running
 		// Sort the pods in the order such that not-ready < ready, unscheduled
 		// < scheduled, and pending < running. This ensures that we delete pods
 		// in the earlier stages whenever possible.
@@ -713,6 +751,7 @@ func (jm *Controller) manageJob(activePods []*v1.Pod, succeeded int32, job *batc
 		wait := sync.WaitGroup{}
 		wait.Add(int(diff))
 		for i := int32(0); i < diff; i++ {
+			// 并发删除多余的 active pods
 			go func(ix int32) {
 				defer wait.Done()
 				if err := jm.podControl.DeletePod(job.Namespace, activePods[ix].Name, job); err != nil {
@@ -733,7 +772,9 @@ func (jm *Controller) manageJob(activePods []*v1.Pod, succeeded int32, job *batc
 		wait.Wait()
 
 	} else if active < parallelism {
+		// 若处于 active 状态的 pods 数小于 job 设置的并发数，则需要创建出新的 pod
 		wantActive := int32(0)
+		// 如果没有声明Completions，那么active的pod应该等于parallelism，如果有pod已经完成了，那么不再创建新的。
 		if job.Spec.Completions == nil {
 			// Job does not specify a number of completions.  Therefore, number active
 			// should be equal to parallelism, unless the job has seen at least
@@ -744,6 +785,8 @@ func (jm *Controller) manageJob(activePods []*v1.Pod, succeeded int32, job *batc
 				wantActive = parallelism
 			}
 		} else {
+			//  如果声明了Completions，那么需要比较Completions和succeeded
+			//  如果wantActive大于parallelism，那么需要创建的Pod数等于parallelism
 			// Job specifies a specific number of completions.  Therefore, number
 			// active should not ever exceed number of remaining completions.
 			wantActive = *job.Spec.Completions - succeeded
@@ -751,11 +794,13 @@ func (jm *Controller) manageJob(activePods []*v1.Pod, succeeded int32, job *batc
 				wantActive = parallelism
 			}
 		}
+		// 计算出 diff 数
 		diff := wantActive - active
 		if diff < 0 {
 			utilruntime.HandleError(fmt.Errorf("More active than wanted: job %q, want %d, have %d", jobKey, wantActive, active))
 			diff = 0
 		}
+		// 表示已经有足够的pod，不需要再创建了
 		if diff == 0 {
 			return active, nil
 		}
@@ -766,6 +811,7 @@ func (jm *Controller) manageJob(activePods []*v1.Pod, succeeded int32, job *batc
 		active += diff
 		wait := sync.WaitGroup{}
 
+		// 创建的 pod 数依次为 1、2、4、8......，呈指数级增长
 		// Batch the pod creates. Batch sizes start at SlowStartInitialBatchSize
 		// and double with each successful iteration in a kind of "slow start".
 		// This handles attempts to start large numbers of pods that would
@@ -778,8 +824,10 @@ func (jm *Controller) manageJob(activePods []*v1.Pod, succeeded int32, job *batc
 			errorCount := len(errCh)
 			wait.Add(int(batchSize))
 			for i := int32(0); i < batchSize; i++ {
+				// 并发程创建pod
 				go func() {
 					defer wait.Done()
+					// 创建pod
 					err := jm.podControl.CreatePodsWithControllerRef(job.Namespace, &job.Spec.Template, job, metav1.NewControllerRef(job, controllerKind))
 					if err != nil {
 						if errors.HasStatusCause(err, v1.NamespaceTerminatingCause) {
@@ -788,6 +836,7 @@ func (jm *Controller) manageJob(activePods []*v1.Pod, succeeded int32, job *batc
 							return
 						}
 					}
+					// 创建失败的处理
 					if err != nil {
 						defer utilruntime.HandleError(err)
 						// Decrement the expected number of creates because the informer won't observe this pod

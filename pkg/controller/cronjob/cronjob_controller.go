@@ -102,6 +102,7 @@ func (jm *Controller) Run(stopCh <-chan struct{}) {
 
 // syncAll lists all the CronJobs and Jobs and reconciles them.
 func (jm *Controller) syncAll() {
+	// 列出所有的job
 	// List children (Jobs) before parents (CronJob).
 	// This guarantees that if we see any Job that got orphaned by the GC orphan finalizer,
 	// we must also see that the parent CronJob has non-nil DeletionTimestamp (see #42639).
@@ -111,6 +112,7 @@ func (jm *Controller) syncAll() {
 	}
 
 	js := make([]batchv1.Job, 0)
+	// 遍历jobListFunc然后将状态正常的job放入到js集合中
 	err := pager.New(pager.SimplePageFunc(jobListFunc)).EachListItem(context.Background(), metav1.ListOptions{}, func(object runtime.Object) error {
 		jobTmp, ok := object.(*batchv1.Job)
 		if !ok {
@@ -126,18 +128,24 @@ func (jm *Controller) syncAll() {
 	}
 
 	klog.V(4).Infof("Found %d jobs", len(js))
+	// 列出所有的cronJobs
 	cronJobListFunc := func(opts metav1.ListOptions) (runtime.Object, error) {
 		return jm.kubeClient.BatchV1beta1().CronJobs(metav1.NamespaceAll).List(context.TODO(), opts)
 	}
 
+	// 遍历所有的jobs，根据ObjectMeta.OwnerReference字段确定该job是否由cronJob所创建
+	// key为uid，value为job集合
 	jobsByCj := groupJobsByParent(js)
 	klog.V(4).Infof("Found %d groups", len(jobsByCj))
+	// 遍历cronJobs
 	err = pager.New(pager.SimplePageFunc(cronJobListFunc)).EachListItem(context.Background(), metav1.ListOptions{}, func(object runtime.Object) error {
 		cj, ok := object.(*batchv1beta1.CronJob)
 		if !ok {
 			return fmt.Errorf("expected type *batchv1beta1.CronJob, got type %T", cj)
 		}
+		// 进行同步
 		syncOne(cj, jobsByCj[cj.UID], time.Now(), jm.jobControl, jm.cjControl, jm.recorder)
+		// 清理所有已经完成的jobs
 		cleanupFinishedJobs(cj, jobsByCj[cj.UID], jm.jobControl, jm.cjControl, jm.recorder)
 		return nil
 	})
@@ -208,6 +216,12 @@ func removeOldestJobs(cj *batchv1beta1.CronJob, js []batchv1.Job, jc jobControlI
 	}
 }
 
+/*
+	在syncOne维护了cronJob的Active列表，在遍历cronJob对应的job列表的时候会判断该job是不是应该从Active列表中删除，操作完之后会更新cronJob的状态。
+	然后会查看当千的cronJob是否已被删除、是否处于suspend状态、判断是否最近有job被调度，并获取最后一次调度时间判断是否满足StartingDeadlineSeconds条件等。
+	接下来会根据ConcurrencyPolicy来判断是Forbid还是Replace。如果是Forbid那么直接略过此次调度，如果是Replace那么会删除所有的Active列表,等后面重新创建。
+	最后调用CreateJob创建job。
+*/
 // syncOne reconciles a CronJob with a list of any Jobs that it created.
 // All known jobs created by "cj" should be included in "js".
 // The current time is passed in to facilitate testing.
@@ -216,9 +230,12 @@ func syncOne(cj *batchv1beta1.CronJob, js []batchv1.Job, now time.Time, jc jobCo
 	nameForLog := fmt.Sprintf("%s/%s", cj.Namespace, cj.Name)
 
 	childrenJobs := make(map[types.UID]bool)
+	// 遍历job列表
 	for _, j := range js {
 		childrenJobs[j.ObjectMeta.UID] = true
+		// 查看这个job是否是在Active列表中
 		found := inActiveList(*cj, j.ObjectMeta.UID)
+		// 如果这个job不是在Active列表中，并且这个job还没有跑完，发送一个异常事件
 		if !found && !IsJobFinished(&j) {
 			recorder.Eventf(cj, v1.EventTypeWarning, "UnexpectedJob", "Saw a job that the controller did not create or forgot: %s", j.Name)
 			// We found an unfinished job that has us as the parent, but it is not in our Active list.
@@ -238,6 +255,7 @@ func syncOne(cj *batchv1beta1.CronJob, js []batchv1.Job, now time.Time, jc jobCo
 		}
 	}
 
+	// 反向再遍历Active列表，如果存在上面记录的jobs，那么就移除
 	// Remove any job reference from the active list if the corresponding job does not exist any more.
 	// Otherwise, the cronjob may be stuck in active mode forever even though there is no matching
 	// job running.
@@ -248,6 +266,7 @@ func syncOne(cj *batchv1beta1.CronJob, js []batchv1.Job, now time.Time, jc jobCo
 		}
 	}
 
+	// 上面做了cronJob的Active列表的修改，所以需要更新一下状态
 	updatedCJ, err := cjc.UpdateStatus(cj)
 	if err != nil {
 		klog.Errorf("Unable to update status for %s (rv = %s): %v", nameForLog, cj.ResourceVersion, err)
@@ -255,6 +274,7 @@ func syncOne(cj *batchv1beta1.CronJob, js []batchv1.Job, now time.Time, jc jobCo
 	}
 	*cj = *updatedCJ
 
+	// cronJob已经被删除了，直接返回
 	if cj.DeletionTimestamp != nil {
 		// The CronJob is being deleted.
 		// Don't do anything other than updating status.
