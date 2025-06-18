@@ -519,6 +519,10 @@ func (f *frameworkImpl) RunFilterPlugins(
 	return statuses
 }
 
+/*
+然后RunFilterPlugins会调用runFilterPlugin方法来运行我们上面讲的getDefaultConfig中设置的过滤器
+过滤器总共有这些：nodeunschedulable,noderesources,nodename,nodeports,nodeaffinity,volumerestrictions,tainttoleration,nodevolumelimits,nodevolumelimits,nodevolumelimits,nodevolumelimits,volumebinding,volumezone,podtopologyspread,interpodaffinity
+*/
 func (f *frameworkImpl) runFilterPlugin(ctx context.Context, pl framework.FilterPlugin, state *framework.CycleState, pod *v1.Pod, nodeInfo *framework.NodeInfo) *framework.Status {
 	if !state.ShouldRecordPluginMetrics() {
 		return pl.Filter(ctx, state, pod, nodeInfo)
@@ -596,6 +600,13 @@ func (f *frameworkImpl) runPreScorePlugin(ctx context.Context, pl framework.PreS
 	return status
 }
 
+/*
+	RunScorePlugins里面分别调用parallelize.Until方法跑三次来进行打分：
+	第一次会调用runScorePlugin方法，里面会调用getDefaultConfig里面设置的score的Plugin来进行打分；
+	第二次会调用runScoreExtension方法，里面会调用Plugin的NormalizeScore方法，用来保证分数必须是0到100之间，不是每一个plugin都会实现NormalizeScore方法。
+	第三此会调用遍历所有的scorePlugins，并对对应的算出的来的分数乘以一个权重。
+	打分的plugin共有：noderesources,imagelocality,interpodaffinity,noderesources,nodeaffinity,nodepreferavoidpods,podtopologyspread,tainttoleration
+*/
 // RunScorePlugins runs the set of configured scoring plugins. It returns a list that
 // stores for each scoring plugin name the corresponding NodeScoreList(s).
 // It also returns *Status, which is set to non-success if any of the plugins returns
@@ -612,6 +623,7 @@ func (f *frameworkImpl) RunScorePlugins(ctx context.Context, state *framework.Cy
 	ctx, cancel := context.WithCancel(ctx)
 	errCh := parallelize.NewErrorChannel()
 
+	// 开启16个线程为node进行打分
 	// Run Score method for each node in parallel.
 	parallelize.Until(ctx, len(nodes), func(index int) {
 		for _, pl := range f.scorePlugins {
@@ -633,6 +645,7 @@ func (f *frameworkImpl) RunScorePlugins(ctx context.Context, state *framework.Cy
 		return nil, framework.NewStatus(framework.Error, msg)
 	}
 
+	// 用于在调度程序计算节点的最终排名之前修改分数,保证 Score 插件的输出必须是 [MinNodeScore，MaxNodeScore]（[0-100]） 范围内的整数
 	// Run NormalizeScore method for each ScorePlugin in parallel.
 	parallelize.Until(ctx, len(f.scorePlugins), func(index int) {
 		pl := f.scorePlugins[index]
@@ -653,6 +666,7 @@ func (f *frameworkImpl) RunScorePlugins(ctx context.Context, state *framework.Cy
 		return nil, framework.NewStatus(framework.Error, msg)
 	}
 
+	// 为每个节点的分数乘上一个权重
 	// Apply score defaultWeights for each ScorePlugin in parallel.
 	parallelize.Until(ctx, len(f.scorePlugins), func(index int) {
 		pl := f.scorePlugins[index]

@@ -345,7 +345,7 @@ func initPolicyFromConfigMap(client clientset.Interface, policyRef *schedulerapi
 // Run begins watching and scheduling. It waits for cache to be synced, then starts scheduling and blocked until the context is done.
 func (sched *Scheduler) Run(ctx context.Context) {
 	sched.SchedulingQueue.Run()
-	// 这是主循环，不断尝试调度一个 Pod，直到上下文结束（例如调度器被关掉）
+	// sched.scheduleOne会被wait.UntilWithContext定时调用，直到ctx.Done()返回true为止。sched.scheduleOne是核心实现
 	wait.UntilWithContext(ctx, sched.scheduleOne, 0)
 	// 当调度器退出（如 ctx.Done() 触发）后，关闭调度队列，清理资源，防止内存泄漏
 	sched.SchedulingQueue.Close()
@@ -501,6 +501,11 @@ func (sched *Scheduler) finishBinding(prof *profile.Profile, assumed *v1.Pod, ta
 }
 
 /*
+	主要做了以下几件事：
+	1.通过sched.NextPod()函数从优先队列中获取一个优先级最高的待调度Pod资源对象，如果没有获取到，那么该方法会阻塞住；
+	2.通过sched.Algorithm.Schedule调度函数执行Predicates的调度算法与Priorities算法，挑选出一个合适的节点；
+	3.当没有找到合适的节点时，调度器会尝试调用prof.RunPostFilterPlugins抢占低优先级的Pod资源对象的节点；
+	4.当调度器为Pod资源对象选择了一个合适的节点时，通过sched.bind函数将合适的节点与Pod资源对象绑定在一起；
 	main()
 	└── RunCommand()
 		└── Run()
