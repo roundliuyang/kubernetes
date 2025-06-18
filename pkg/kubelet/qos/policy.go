@@ -22,6 +22,7 @@ import (
 	"k8s.io/kubernetes/pkg/kubelet/types"
 )
 
+// 分值越高越容易被kill
 const (
 	// KubeletOOMScoreAdj is the OOM score adjustment for Kubelet
 	KubeletOOMScoreAdj int = -999
@@ -31,6 +32,11 @@ const (
 	besteffortOOMScoreAdj int = 1000
 )
 
+/*
+	这个方法里面给不同的pod进行打分，静态Pod、镜像Pod和高优先级Pod，QOS直接被设置成为guaranteed；
+	然后调用qos的GetPodQOS方法获取一个pod的评分，但是如果一个pod是burstable，那么需要根据其直接使用的内存来进行评分，
+	占用的内存越少，则打分就越高，如果分数小于1000 + guaranteedOOMScoreAdj，也就是2分，那么被直接设置成2分，避免分数过低。
+*/
 // GetContainerOOMScoreAdjust returns the amount by which the OOM score of all processes in the
 // container should be adjusted.
 // The OOM score of a process is the percentage of memory it consumes
@@ -38,11 +44,13 @@ const (
 // and 1000. Containers with higher OOM scores are killed if the system runs out of memory.
 // See https://lwn.net/Articles/391222/ for more information.
 func GetContainerOOMScoreAdjust(pod *v1.Pod, container *v1.Container, memoryCapacity int64) int {
+	// 静态Pod、镜像Pod和高优先级Pod，直接可以是guaranteedOOMScoreAdj
 	if types.IsCriticalPod(pod) {
 		// Critical pods should be the last to get killed.
 		return guaranteedOOMScoreAdj
 	}
 
+	// 获取pod的qos等级，这里只处理Guaranteed与BestEffort
 	switch v1qos.GetPodQOS(pod) {
 	case v1.PodQOSGuaranteed:
 		// Guaranteed containers should be the last to get killed.
@@ -60,7 +68,10 @@ func GetContainerOOMScoreAdjust(pod *v1.Pod, container *v1.Container, memoryCapa
 	// targets for OOM kills.
 	// Note that this is a heuristic, it won't work if a container has many small processes.
 	memoryRequest := container.Resources.Requests.Memory().Value()
+	// 如果我们占用的内存越少，则打分就越高
 	oomScoreAdjust := 1000 - (1000*memoryRequest)/memoryCapacity
+
+	// 这里是为了保证burstable能有个更高的 OOM score
 	// A guaranteed pod using 100% of memory can have an OOM score of 10. Ensure
 	// that burstable pods have a higher OOM score adjustment.
 	if int(oomScoreAdjust) < (1000 + guaranteedOOMScoreAdj) {

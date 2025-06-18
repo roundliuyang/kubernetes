@@ -98,6 +98,7 @@ func validSignal(signal evictionapi.Signal) bool {
 	return found
 }
 
+// 遍历thresholds，然后根据对应的Eviction Signals找到对应的resource
 // getReclaimableThreshold finds the threshold and resource to reclaim
 func getReclaimableThreshold(thresholds []evictionapi.Threshold) (evictionapi.Threshold, v1.ResourceName, bool) {
 	for _, thresholdToReclaim := range thresholds {
@@ -470,10 +471,9 @@ func cachedStatsFunc(podStats []statsapi.PodStats) statsFunc {
 
 // Cmp compares p1 and p2 and returns:
 //
-//   -1 if p1 <  p2
-//    0 if p1 == p2
-//   +1 if p1 >  p2
-//
+//	-1 if p1 <  p2
+//	 0 if p1 == p2
+//	+1 if p1 >  p2
 type cmpFunc func(p1, p2 *v1.Pod) int
 
 // multiSorter implements the Sort interface, sorting changes within.
@@ -695,6 +695,7 @@ func (a byEvictionPriority) Less(i, j int) bool {
 	return a[i].Signal == evictionapi.SignalMemoryAvailable || a[i].Signal == evictionapi.SignalAllocatableMemoryAvailable || !jSignalHasResource
 }
 
+// 这个方法主要是将summary里面的资源利用情况根据不同的eviction signal封装到result里面返回
 // makeSignalObservations derives observations using the specified summary provider.
 func makeSignalObservations(summary *statsapi.Summary) (signalObservations, statsFunc) {
 	// build the function to work against for pod stats
@@ -776,6 +777,13 @@ func getSysContainer(sysContainers []statsapi.ContainerStats, name string) (*sta
 	return nil, fmt.Errorf("system container %q not found in metrics", name)
 }
 
+/*
+	thresholdsMet会遍历整个thresholds，然后从observations里面获取eviction signal对应的资源情况。
+	因为我们上面讲了设置的threshold可以是1Gi，也可以是百分比，所以需要调用GetThresholdQuantity方法换算一下，得到quantity；
+	然后根据Minimum eviction reclaim 策略判断一下是否还需要提高这个需要eviction的资源，
+	具体的信息查看文档：https://kubernetes.io/docs/tasks/administer-cluster/out-of-resource/#minimum-eviction-reclaim；
+	然后用quantity和available比较一下，如果已达阈值，那么加入到results集合中返回。
+*/
 // thresholdsMet returns the set of thresholds that were met independent of grace period
 func thresholdsMet(thresholds []evictionapi.Threshold, observations signalObservations, enforceMinReclaim bool) []evictionapi.Threshold {
 	results := []evictionapi.Threshold{}
@@ -788,16 +796,23 @@ func thresholdsMet(thresholds []evictionapi.Threshold, observations signalObserv
 		}
 		// determine if we have met the specified threshold
 		thresholdMet := false
+		// 根据资源容量获取阈值的资源大小
 		quantity := evictionapi.GetThresholdQuantity(threshold.Value, observed.capacity)
+		// Minimum eviction reclaim 策略，具体看：https://kubernetes.io/docs/tasks/administer-cluster/out-of-resource/#minimum-eviction-reclaim
 		// if enforceMinReclaim is specified, we compare relative to value - minreclaim
 		if enforceMinReclaim && threshold.MinReclaim != nil {
 			quantity.Add(*evictionapi.GetThresholdQuantity(*threshold.MinReclaim, observed.capacity))
 		}
+
+		// 如果observed.available比quantity大，那么返回1
 		thresholdResult := quantity.Cmp(*observed.available)
+		// 检查Operator标识符
 		switch threshold.Operator {
+		// 如果是小于号"<",当thresholdResult大于0，返回true
 		case evictionapi.OpLessThan:
 			thresholdMet = thresholdResult > 0
 		}
+		// 如果append到results，表示已经到达阈值
 		if thresholdMet {
 			results = append(results, threshold)
 		}
@@ -878,11 +893,24 @@ func thresholdsMetGracePeriod(observedAt thresholdsObservedAt, now time.Time) []
 	return results
 }
 
+/*
+	nodeConditions方法主要就是根据signalToNodeCondition来映射对应的nodeCondition，其中nodeCondition如下：
+		signalToNodeCondition = map[evictionapi.Signal]v1.NodeConditionType{}
+		signalToNodeCondition[evictionapi.SignalMemoryAvailable] = v1.NodeMemoryPressure
+		signalToNodeCondition[evictionapi.SignalAllocatableMemoryAvailable] = v1.NodeMemoryPressure
+		signalToNodeCondition[evictionapi.SignalImageFsAvailable] = v1.NodeDiskPressure
+		signalToNodeCondition[evictionapi.SignalNodeFsAvailable] = v1.NodeDiskPressure
+		signalToNodeCondition[evictionapi.SignalImageFsInodesFree] = v1.NodeDiskPressure
+		signalToNodeCondition[evictionapi.SignalNodeFsInodesFree] = v1.NodeDiskPressure
+		signalToNodeCondition[evictionapi.SignalPIDAvailable] = v1.NodePIDPressure
+	也就是将Eviction Signals分别映射成了MemoryPressure或DiskPressure
+*/
 // nodeConditions returns the set of node conditions associated with a threshold
 func nodeConditions(thresholds []evictionapi.Threshold) []v1.NodeConditionType {
 	results := []v1.NodeConditionType{}
 	for _, threshold := range thresholds {
 		if nodeCondition, found := signalToNodeCondition[threshold.Signal]; found {
+			// 检查results里是否已有nodeCondition
 			if !hasNodeCondition(results, nodeCondition) {
 				results = append(results, nodeCondition)
 			}
@@ -984,6 +1012,7 @@ func isAllocatableEvictionThreshold(threshold evictionapi.Threshold) bool {
 	return threshold.Signal == evictionapi.SignalAllocatableMemoryAvailable
 }
 
+// 这个方法里面会将各个eviction signal的排序方法放入到一个map中返回，如MemoryAvailable、NodeFsAvailable、ImageFsAvailable等
 // buildSignalToRankFunc returns ranking functions associated with resources
 func buildSignalToRankFunc(withImageFs bool) map[evictionapi.Signal]rankFunc {
 	signalToRankFunc := map[evictionapi.Signal]rankFunc{

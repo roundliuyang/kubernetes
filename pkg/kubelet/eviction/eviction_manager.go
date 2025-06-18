@@ -178,12 +178,14 @@ func (m *managerImpl) Admit(attrs *lifecycle.PodAdmitAttributes) lifecycle.PodAd
 	}
 }
 
+// 开启一个控制循环去监视和响应资源过低的情况
 // Start starts the control loop to observe and response to low compute resources.
 func (m *managerImpl) Start(diskInfoProvider DiskInfoProvider, podFunc ActivePodsFunc, podCleanedUpFunc PodCleanedUpFunc, monitoringInterval time.Duration) {
 	thresholdHandler := func(message string) {
 		klog.Infof(message)
 		m.synchronize(diskInfoProvider, podFunc)
 	}
+	// 是否要利用kernel memcg notification
 	if m.config.KernelMemcgNotification {
 		for _, threshold := range m.config.Thresholds {
 			if threshold.Signal == evictionapi.SignalMemoryAvailable || threshold.Signal == evictionapi.SignalAllocatableMemoryAvailable {
@@ -197,9 +199,11 @@ func (m *managerImpl) Start(diskInfoProvider DiskInfoProvider, podFunc ActivePod
 			}
 		}
 	}
+	// 启动一个goroutine，for循环里每隔monitoringInterval（10s）执行一次synchronize
 	// start the eviction manager monitoring
 	go func() {
 		for {
+			// synchronize是主要的eviction控制循环，返回被kill的pod，或返回nill
 			if evictedPods := m.synchronize(diskInfoProvider, podFunc); evictedPods != nil {
 				klog.Infof("eviction manager: pods %s evicted, waiting for pod to be cleaned up", format.Pods(evictedPods))
 				m.waitForPodsCleanup(podCleanedUpFunc, evictedPods)
@@ -249,18 +253,23 @@ func (m *managerImpl) synchronize(diskInfoProvider DiskInfoProvider, podFunc Act
 			return nil
 		}
 		m.dedicatedImageFs = &hasImageFs
+		// 注册各个eviction signal所对应的资源排序方法
 		m.signalToRankFunc = buildSignalToRankFunc(hasImageFs)
+		// 注册节点资源回收方法，例如imagefs.avaliable对应的是删除无用容器和无用镜像
 		m.signalToNodeReclaimFuncs = buildSignalToNodeReclaimFuncs(m.imageGC, m.containerGC, hasImageFs)
 	}
 
+	// 获取当前active的pods
 	activePods := podFunc()
 	updateStats := true
+	// 获取节点的整体概况，即nodeStsts和podStats
 	summary, err := m.summaryProvider.Get(updateStats)
 	if err != nil {
 		klog.Errorf("eviction manager: failed to get summary stats: %v", err)
 		return nil
 	}
 
+	// 如果Notifiers有超过10s没有刷新，那么更新Notifiers
 	if m.clock.Since(m.thresholdsLastUpdated) > notifierRefreshInterval {
 		m.thresholdsLastUpdated = m.clock.Now()
 		for _, notifier := range m.thresholdNotifiers {
@@ -270,10 +279,12 @@ func (m *managerImpl) synchronize(diskInfoProvider DiskInfoProvider, podFunc Act
 		}
 	}
 
+	// 根据summary信息创建相应的统计信息到observations对象中，如SignalMemoryAvailable、SignalNodeFsAvailable等
 	// make observations and get a function to derive pod usage stats relative to those observations.
 	observations, statsFunc := makeSignalObservations(summary)
 	debugLogObservations("observations", observations)
 
+	// 根据获取的observations判断是否已到达阈值的thresholds，然后返回
 	// determine the set of thresholds met independent of grace period
 	thresholds = thresholdsMet(thresholds, observations, false)
 	debugLogThresholdsWithObservation("thresholds - ignoring grace period", thresholds, observations)
@@ -287,23 +298,29 @@ func (m *managerImpl) synchronize(diskInfoProvider DiskInfoProvider, podFunc Act
 
 	// track when a threshold was first observed
 	now := m.clock.Now()
+	// 主要用来记录 eviction signal 第一次的时间，没有则设置 now 时间
 	thresholdsFirstObservedAt := thresholdsFirstObservedAt(thresholds, m.thresholdsFirstObservedAt, now)
 
+	// Kubelet会将对应的Eviction Signals映射到对应的Node Conditions
 	// the set of node conditions that are triggered by currently observed thresholds
 	nodeConditions := nodeConditions(thresholds)
 	if len(nodeConditions) > 0 {
 		klog.V(3).Infof("eviction manager: node conditions - observed: %v", nodeConditions)
 	}
 
+	// 本轮 node condition 与上次的observed合并，以最新的为准
 	// track when a node condition was last observed
 	nodeConditionsLastObservedAt := nodeConditionsLastObservedAt(nodeConditions, m.nodeConditionsLastObservedAt, now)
 
+	// PressureTransitionPeriod参数默认为5分钟
+	// 防止Node的资源不断在阈值附近波动，从而不断变动Node Condition值
 	// node conditions report true if it has been observed within the transition period window
 	nodeConditions = nodeConditionsObservedSince(nodeConditionsLastObservedAt, m.config.PressureTransitionPeriod, now)
 	if len(nodeConditions) > 0 {
 		klog.V(3).Infof("eviction manager: node conditions - transition period not met: %v", nodeConditions)
 	}
 
+	// 设置 eviction-soft-grace-period，默认为90秒，超过该值加入阈值集合
 	// determine the set of thresholds we need to drive eviction behavior (i.e. all grace periods are met)
 	thresholds = thresholdsMetGracePeriod(thresholdsFirstObservedAt, now)
 	debugLogThresholdsWithObservation("thresholds - grace periods satisfied", thresholds, observations)
@@ -315,10 +332,12 @@ func (m *managerImpl) synchronize(diskInfoProvider DiskInfoProvider, podFunc Act
 	m.nodeConditionsLastObservedAt = nodeConditionsLastObservedAt
 	m.thresholdsMet = thresholds
 
+	// 阈值集合跟上次比较是否需要更新
 	// determine the set of thresholds whose stats have been updated since the last sync
 	thresholds = thresholdsUpdatedStats(thresholds, observations, m.lastObservations)
 	debugLogThresholdsWithObservation("thresholds - updated stats", thresholds, observations)
 
+	// 将本次的信息设置为上次信息
 	m.lastObservations = observations
 	m.Unlock()
 
@@ -330,11 +349,13 @@ func (m *managerImpl) synchronize(diskInfoProvider DiskInfoProvider, podFunc Act
 		}
 	}
 
+	// 如果没有 eviction signal 集合则本轮结束流程
 	if len(thresholds) == 0 {
 		klog.V(3).Infof("eviction manager: no resources are starved")
 		return nil
 	}
 
+	// 排序之后获取thresholds集合中的第一个元素
 	// rank the thresholds by eviction priority
 	sort.Sort(byEvictionPriority(thresholds))
 	thresholdToReclaim, resourceToReclaim, foundAny := getReclaimableThreshold(thresholds)
@@ -346,6 +367,7 @@ func (m *managerImpl) synchronize(diskInfoProvider DiskInfoProvider, podFunc Act
 	// record an event about the resources we are now attempting to reclaim via eviction
 	m.recorder.Eventf(m.nodeRef, v1.EventTypeWarning, "EvictionThresholdMet", "Attempting to reclaim %s", resourceToReclaim)
 
+	// 回收节点级别的资源
 	// check if there are node-level resources we can reclaim to reduce pressure before evicting end-user pods.
 	if m.reclaimNodeLevelResources(thresholdToReclaim.Signal, resourceToReclaim) {
 		klog.Infof("eviction manager: able to reduce %v pressure without evicting pods.", resourceToReclaim)
@@ -354,6 +376,7 @@ func (m *managerImpl) synchronize(diskInfoProvider DiskInfoProvider, podFunc Act
 
 	klog.Infof("eviction manager: must evict pod(s) to reclaim %v", resourceToReclaim)
 
+	// 得到上面的eviction signal 排序函数，在buildSignalToRankFunc方法中设置
 	// rank the pods for eviction
 	rank, ok := m.signalToRankFunc[thresholdToReclaim.Signal]
 	if !ok {
@@ -361,12 +384,14 @@ func (m *managerImpl) synchronize(diskInfoProvider DiskInfoProvider, podFunc Act
 		return nil
 	}
 
+	// 如果没有 active pod 直接返回
 	// the only candidates viable for eviction are those pods that had anything running.
 	if len(activePods) == 0 {
 		klog.Errorf("eviction manager: eviction thresholds have been met, but no pods are active to evict")
 		return nil
 	}
 
+	// 将pod按照特定资源排序
 	// rank the running pods for eviction for the specified resource
 	rank(activePods, statsFunc)
 
@@ -380,6 +405,7 @@ func (m *managerImpl) synchronize(diskInfoProvider DiskInfoProvider, podFunc Act
 		}
 	}
 
+	// 只要有一个pod被删除了，那么就返回~
 	// we kill at most a single pod during each eviction interval
 	for i := range activePods {
 		pod := activePods[i]
@@ -423,14 +449,17 @@ func (m *managerImpl) waitForPodsCleanup(podCleanedUpFunc PodCleanedUpFunc, pods
 
 // reclaimNodeLevelResources attempts to reclaim node level resources.  returns true if thresholds were satisfied and no pod eviction is required.
 func (m *managerImpl) reclaimNodeLevelResources(signalToReclaim evictionapi.Signal, resourceToReclaim v1.ResourceName) bool {
+	// 调用buildSignalToNodeReclaimFuncs中设置的方法
 	nodeReclaimFuncs := m.signalToNodeReclaimFuncs[signalToReclaim]
 	for _, nodeReclaimFunc := range nodeReclaimFuncs {
+		// 删除没用使用到的images或 删除已经是dead状态的Pod 和 container
 		// attempt to reclaim the pressured resource.
 		if err := nodeReclaimFunc(); err != nil {
 			klog.Warningf("eviction manager: unexpected error when attempting to reduce %v pressure: %v", resourceToReclaim, err)
 		}
 
 	}
+	// 回收之后再检查一下资源占用情况，如果没有达到阈值，那么直接结束
 	if len(nodeReclaimFuncs) > 0 {
 		summary, err := m.summaryProvider.Get(true)
 		if err != nil {

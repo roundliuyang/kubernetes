@@ -42,10 +42,13 @@ func GetPodQOS(pod *v1.Pod) v1.PodQOSClass {
 	zeroQuantity := resource.MustParse("0")
 	isGuaranteed := true
 	allContainers := []v1.Container{}
+	// 追加所有的初始化容器
 	allContainers = append(allContainers, pod.Spec.Containers...)
 	allContainers = append(allContainers, pod.Spec.InitContainers...)
+	// 遍历container
 	for _, container := range allContainers {
 		// process requests
+		// 遍历requests 里面的cpu、memory 获取其中的值
 		for name, quantity := range container.Resources.Requests {
 			if !isSupportedQoSComputeResource(name) {
 				continue
@@ -61,6 +64,7 @@ func GetPodQOS(pod *v1.Pod) v1.PodQOSClass {
 			}
 		}
 		// process limits
+		// 遍历 limit 里面的cpu、memory 获取其中的值
 		qosLimitsFound := sets.NewString()
 		for name, quantity := range container.Resources.Limits {
 			if !isSupportedQoSComputeResource(name) {
@@ -78,10 +82,13 @@ func GetPodQOS(pod *v1.Pod) v1.PodQOSClass {
 			}
 		}
 
+		// 如果limits 没有同时设置cpu 、Memory，那么就不是Guaranteed
 		if !qosLimitsFound.HasAll(string(v1.ResourceMemory), string(v1.ResourceCPU)) {
 			isGuaranteed = false
 		}
 	}
+
+	// 如果requests 和 limits都没有设置，那么为BestEffort
 	if len(requests) == 0 && len(limits) == 0 {
 		return v1.PodQOSBestEffort
 	}
@@ -94,6 +101,7 @@ func GetPodQOS(pod *v1.Pod) v1.PodQOSClass {
 			}
 		}
 	}
+	// 都设置了limits 和 requests，则是Guaranteed
 	if isGuaranteed &&
 		len(requests) == len(limits) {
 		return v1.PodQOSGuaranteed
