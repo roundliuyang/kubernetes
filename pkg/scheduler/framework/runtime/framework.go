@@ -533,6 +533,9 @@ func (f *frameworkImpl) runFilterPlugin(ctx context.Context, pl framework.Filter
 	return status
 }
 
+/*
+	遍历所有的postFilterPlugins，然后执行runPostFilterPlugin方法
+*/
 // RunPostFilterPlugins runs the set of configured PostFilter plugins until the first
 // Success or Error is met, otherwise continues to execute all plugins.
 func (f *frameworkImpl) RunPostFilterPlugins(ctx context.Context, state *framework.CycleState, pod *v1.Pod, filteredNodeStatusMap framework.NodeToStatusMap) (_ *framework.PostFilterResult, status *framework.Status) {
@@ -542,6 +545,7 @@ func (f *frameworkImpl) RunPostFilterPlugins(ctx context.Context, state *framewo
 	}()
 
 	statuses := make(framework.PluginToStatus)
+	// postFilterPlugins里面只有一个defaultpreemption(默认抢占)
 	for _, pl := range f.postFilterPlugins {
 		r, s := f.runPostFilterPlugin(ctx, pl, state, pod, filteredNodeStatusMap)
 		if s.IsSuccess() {

@@ -590,6 +590,7 @@ func (sched *Scheduler) scheduleOne(ctx context.Context) {
 				} else {
 					klog.V(5).Infof("Status after running PostFilter plugins for pod %v/%v: %v", pod.Namespace, pod.Name, status)
 				}
+				// 抢占成功后，将nominatedNodeName设置为被抢占的 Node 的名字，然后重新进入下一个调度周期
 				if status.IsSuccess() && result != nil {
 					nominatedNode = result.NominatedNodeName
 				}
