@@ -155,12 +155,15 @@ func newPodWorkers(syncPodFn syncPodFnType, recorder record.EventRecorder, workQ
 	}
 }
 
+// 这个方法会遍历channel里面的数据，然后调用syncPodFn方法并传入一个syncPodOptions，kubelet会在执行NewMainKubelet方法的时候
+// 调用newPodWorkers方法设置syncPodFn为Kubelet的syncPod方法
 func (p *podWorkers) managePodLoop(podUpdates <-chan UpdatePodOptions) {
 	var lastSyncTime time.Time
+	// 遍历channel
 	for update := range podUpdates {
 		err := func() error {
 			podUID := update.Pod.UID
-			// 同步pod的函数
+			// 直到cache里面有新数据之前这段代码会阻塞，这保证worker在cache里面有新的数据之前不会提前开始
 			// This is a blocking call that would return only if the cache
 			// has an entry for the pod that is newer than minRuntimeCache
 			// Time. This ensures the worker doesn't start syncing until
@@ -173,6 +176,7 @@ func (p *podWorkers) managePodLoop(podUpdates <-chan UpdatePodOptions) {
 				p.recorder.Eventf(update.Pod, v1.EventTypeWarning, events.FailedSync, "error determining status: %v", err)
 				return err
 			}
+			// syncPodFn会在kubelet初始化的时候设置，调用的是kubelet的syncPod方法
 			err = p.syncPodFn(syncPodOptions{
 				mirrorPod:      update.MirrorPod,
 				pod:            update.Pod,
@@ -195,7 +199,7 @@ func (p *podWorkers) managePodLoop(podUpdates <-chan UpdatePodOptions) {
 	}
 }
 
-// 查到初始化的地方
+// 这个方法会加锁之后获取podUpdates数组里面数据，如果不存在那么会创建一个channel然后执行一个异步协程。
 // Apply the new setting to the specified pod.
 // If the options provide an OnCompleteFunc, the function is invoked if the update is accepted.
 // Update requests are ignored if a kill pod request is pending.
@@ -207,7 +211,7 @@ func (p *podWorkers) UpdatePod(options *UpdatePodOptions) {
 
 	p.podLock.Lock()
 	defer p.podLock.Unlock()
-	// 当pod不存在时，满足示例，是新建的pod
+	// 如果该pod在podUpdates数组里面找不到，那么就创建channel，并启动异步线程
 	if podUpdates, exists = p.podUpdates[uid]; !exists {
 		// We need to have a buffer here, because checkForUpdates() method that
 		// puts an update into channel is called from the same goroutine where
@@ -226,6 +230,8 @@ func (p *podWorkers) UpdatePod(options *UpdatePodOptions) {
 			p.managePodLoop(podUpdates)
 		}()
 	}
+
+	// 下发更新事件
 	if !p.isWorking[pod.UID] {
 		p.isWorking[pod.UID] = true
 		podUpdates <- *options

@@ -125,6 +125,15 @@ func (s *startSpec) getTargetID(podStatus *kubecontainer.PodStatus) (*kubecontai
 	return &targetStatus.ID, nil
 }
 
+/*
+	1.拉取镜像；
+	2.计算一下Container重启次数，如果是首次创建，那么应该是0；
+	3.生成Container config，用于创建container；
+	4.调用CRI接口CreateContainer创建Container；
+	5.在启动之前调用PreStartContainer做预处理工作；
+	6.调用CRI接口StartContainer启动container；
+	7.调用生命周期中设置的钩子 post start；
+*/
 // startContainer starts a container and returns a message indicates why it is failed on error.
 // It starts the container through the following steps:
 // * pull the image
@@ -134,6 +143,7 @@ func (s *startSpec) getTargetID(podStatus *kubecontainer.PodStatus) (*kubecontai
 func (m *kubeGenericRuntimeManager) startContainer(podSandboxID string, podSandboxConfig *runtimeapi.PodSandboxConfig, spec *startSpec, pod *v1.Pod, podStatus *kubecontainer.PodStatus, pullSecrets []v1.Secret, podIP string, podIPs []string) (string, error) {
 	container := spec.container
 
+	// 拉取镜像
 	// Step 1: pull the image.
 	imageRef, msg, err := m.imagePuller.EnsureImageExists(pod, container, pullSecrets, podSandboxConfig)
 	if err != nil {
@@ -142,6 +152,7 @@ func (m *kubeGenericRuntimeManager) startContainer(podSandboxID string, podSandb
 		return msg, err
 	}
 
+	// 如果是个新的container，那么restartCount应该为0
 	// Step 2: create the container.
 	// For a new container, the RestartCount should be 0
 	restartCount := 0
@@ -157,6 +168,7 @@ func (m *kubeGenericRuntimeManager) startContainer(podSandboxID string, podSandb
 		return s.Message(), ErrCreateContainerConfig
 	}
 
+	// 生成Container config
 	containerConfig, cleanupAction, err := m.generateContainerConfig(container, pod, restartCount, podIP, imageRef, podIPs, target)
 	if cleanupAction != nil {
 		defer cleanupAction()
@@ -167,12 +179,14 @@ func (m *kubeGenericRuntimeManager) startContainer(podSandboxID string, podSandb
 		return s.Message(), ErrCreateContainerConfig
 	}
 
+	// 调用CRI接口创建Container
 	containerID, err := m.runtimeService.CreateContainer(podSandboxID, containerConfig, podSandboxConfig)
 	if err != nil {
 		s, _ := grpcstatus.FromError(err)
 		m.recordContainerEvent(pod, container, containerID, v1.EventTypeWarning, events.FailedToCreateContainer, "Error: %v", s.Message())
 		return s.Message(), ErrCreateContainer
 	}
+	// 调用生命周期的钩子，预启动Pre Start Container
 	err = m.internalLifecycle.PreStartContainer(pod, container, containerID)
 	if err != nil {
 		s, _ := grpcstatus.FromError(err)
@@ -181,6 +195,7 @@ func (m *kubeGenericRuntimeManager) startContainer(podSandboxID string, podSandb
 	}
 	m.recordContainerEvent(pod, container, containerID, v1.EventTypeNormal, events.CreatedContainer, fmt.Sprintf("Created container %s", container.Name))
 
+	// 调用CRI接口启动container
 	// Step 3: start the container.
 	err = m.runtimeService.StartContainer(containerID)
 	if err != nil {
@@ -209,15 +224,18 @@ func (m *kubeGenericRuntimeManager) startContainer(podSandboxID string, podSandb
 		}
 	}
 
+	// 依然是调用生命周期中设置的钩子 post start
 	// Step 4: execute the post start hook.
 	if container.Lifecycle != nil && container.Lifecycle.PostStart != nil {
 		kubeContainerID := kubecontainer.ContainerID{
 			Type: m.runtimeName,
 			ID:   containerID,
 		}
+		// 执行预处理工作
 		msg, handlerErr := m.runner.Run(kubeContainerID, pod, container, container.Lifecycle.PostStart)
 		if handlerErr != nil {
 			m.recordContainerEvent(pod, container, kubeContainerID.ID, v1.EventTypeWarning, events.FailedPostStartHook, msg)
+			// 如果预处理失败，那么需要kill掉Container
 			if err := m.killContainer(pod, kubeContainerID, container.Name, "FailedPostStartHook", nil); err != nil {
 				klog.Errorf("Failed to kill container %q(id=%q) in pod %q: %v, %v",
 					container.Name, kubeContainerID.String(), format.Pod(pod), ErrPostStartHook, err)

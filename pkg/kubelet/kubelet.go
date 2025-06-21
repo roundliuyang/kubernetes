@@ -1429,7 +1429,16 @@ func (kl *Kubelet) Run(updates <-chan kubetypes.PodUpdate) {
 	kl.syncLoop(updates, kl)
 }
 
-// 找到syncPodFn被实例化的函数
+/*
+	1.校验该pod能否运行，如果不能运行，那么回写container的等待原因，然后更新状态管理器中的状态；
+	2.如果校验没通过或pod已被删除或pod跑失败了，那么kill掉pod，然后返回；
+	3.校验网络插件是否已准备好，如果没有，直接返回；
+	4.如果该pod的cgroups不存在，那么就创建cgroups；
+	5.为静态pod创建镜像；
+	6.创建pod的文件目录，等待volumes attach/mount；
+	7.拉取这个pod的Secret；
+	8.调用containerRuntime.SyncPod真正创建pod；
+*/
 // syncPod is the transaction script for the sync of a single pod.
 //
 // Arguments:
@@ -1529,7 +1538,9 @@ func (kl *Kubelet) syncPod(o syncPodOptions) error {
 		metrics.PodStartDuration.Observe(metrics.SinceInSeconds(firstSeenTime))
 	}
 
+	// 校验该pod能否运行
 	runnable := kl.canRunPod(pod)
+	// 如果不能运行，那么回写container的等待原因
 	if !runnable.Admit {
 		// Pod is not runnable; update the Pod and Container statuses to why.
 		apiPodStatus.Reason = runnable.Reason
@@ -1548,9 +1559,11 @@ func (kl *Kubelet) syncPod(o syncPodOptions) error {
 		}
 	}
 
+	// 更新状态管理器中的状态
 	// Update status in the status manager
 	kl.statusManager.SetPodStatus(pod, apiPodStatus)
 
+	// 如果校验没通过或pod已被删除或pod跑失败了，那么kill掉pod
 	// Kill pod if it should not be running
 	if !runnable.Admit || pod.DeletionTimestamp != nil || apiPodStatus.Phase == v1.PodFailed {
 		var syncErr error
@@ -1568,18 +1581,23 @@ func (kl *Kubelet) syncPod(o syncPodOptions) error {
 		return syncErr
 	}
 
+	// 校验网络插件是否已准备好
 	// If the network plugin is not ready, only start the pod if it uses the host network
 	if err := kl.runtimeState.networkErrors(); err != nil && !kubecontainer.IsHostNetworkPod(pod) {
 		kl.recorder.Eventf(pod, v1.EventTypeWarning, events.NetworkNotReady, "%s: %v", NetworkNotReadyErrorMsg, err)
 		return fmt.Errorf("%s: %v", NetworkNotReadyErrorMsg, err)
 	}
 
+	// 创建
 	// Create Cgroups for the pod and apply resource parameters
 	// to them if cgroups-per-qos flag is enabled.
 	pcm := kl.containerManager.NewPodContainerManager()
+
+	// 校验该pod是否已被Terminate
 	// If pod has already been terminated then we need not create
 	// or update the pod's cgroup
 	if !kl.podIsTerminated(pod) {
+		// 校验该pod是否首次创建
 		// When the kubelet is restarted with the cgroups-per-qos
 		// flag enabled, all the pod's running containers
 		// should be killed intermittently and brought back up
@@ -1595,11 +1613,14 @@ func (kl *Kubelet) syncPod(o syncPodOptions) error {
 		// Don't kill containers in pod if pod's cgroups already
 		// exists or the pod is running for the first time
 		podKilled := false
+		// 如果该pod 的cgroups不存在，并且不是首次启动，那么kill掉
 		if !pcm.Exists(pod) && !firstSync {
 			if err := kl.killPod(pod, nil, podStatus, nil); err == nil {
 				podKilled = true
 			}
 		}
+
+		// 如果该pod在上面没有被kill掉，或重启策略不是永不重启
 		// Create and Update pod's Cgroups
 		// Don't create cgroups for run once pod if it was killed above
 		// The current policy is not to restart the run once pods when
@@ -1608,6 +1629,7 @@ func (kl *Kubelet) syncPod(o syncPodOptions) error {
 		// they are not expected to run again.
 		// We don't create and apply updates to cgroup if its a run once pod and was killed above
 		if !(podKilled && pod.Spec.RestartPolicy == v1.RestartPolicyNever) {
+			// 如果该pod的cgroups不存在，那么就创建cgroups
 			if !pcm.Exists(pod) {
 				if err := kl.containerManager.UpdateQOSCgroups(); err != nil {
 					klog.V(2).Infof("Failed to update QoS cgroups while syncing pod: %v", err)
@@ -1620,6 +1642,7 @@ func (kl *Kubelet) syncPod(o syncPodOptions) error {
 		}
 	}
 
+	// 为静态pod 创建 镜像
 	// Create Mirror Pod for Static Pod if it doesn't already exist
 	if kubetypes.IsStaticPod(pod) {
 		deleted := false
@@ -1650,6 +1673,7 @@ func (kl *Kubelet) syncPod(o syncPodOptions) error {
 		}
 	}
 
+	// 创建pod的文件目录
 	// Make data directories for the pod
 	if err := kl.makePodDataDirs(pod); err != nil {
 		kl.recorder.Eventf(pod, v1.EventTypeWarning, events.FailedToMakePodDataDirectories, "error making pod data directories: %v", err)
@@ -1657,6 +1681,7 @@ func (kl *Kubelet) syncPod(o syncPodOptions) error {
 		return err
 	}
 
+	// 如果该pod没有被终止，那么需要等待attach/mount volumes
 	// Volume manager will not mount volumes for terminated pods
 	if !kl.podIsTerminated(pod) {
 		// Wait for volumes to attach/mount
@@ -1667,6 +1692,7 @@ func (kl *Kubelet) syncPod(o syncPodOptions) error {
 		}
 	}
 
+	// 如果有 image secrets，去 apiserver 获取对应的 secrets 数据
 	// Fetch the pull secrets for the pod
 	pullSecrets := kl.getPullSecretsForPod(pod)
 
@@ -2034,6 +2060,7 @@ func (kl *Kubelet) syncLoopIteration(configCh <-chan kubetypes.PodUpdate, handle
 	return true
 }
 
+// dispatchWork会封装一个UpdatePodOptions结构体丢给podWorkers.UpdatePod去执行
 // dispatchWork starts the asynchronous sync of the pod in a pod worker.
 // If the pod has completed termination, dispatchWork will perform no action.
 func (kl *Kubelet) dispatchWork(pod *v1.Pod, syncType kubetypes.SyncPodType, mirrorPod *v1.Pod, start time.Time) {
@@ -2079,6 +2106,13 @@ func (kl *Kubelet) handleMirrorPod(mirrorPod *v1.Pod, start time.Time) {
 	}
 }
 
+/*
+	1.按照创建时间给pods进行排序；
+	2.将pod添加到pod管理器中，如果有pod不存在在pod管理器中，那么这个pod表示已经被删除了；
+	3.校验pod 是否能在该节点运行，如果不可以直接拒绝；
+	4.调用dispatchWork把 pod 分配给给 worker 做异步处理,创建pod；
+	5.将pod添加到probeManager中，如果 pod 中定义了 readiness 和 liveness 健康检查，启动 goroutine 定期进行检测；
+*/
 // HandlePodAdditions is the callback in SyncHandler for pods being added from
 // a config source.
 func (kl *Kubelet) HandlePodAdditions(pods []*v1.Pod) {
@@ -2086,6 +2120,7 @@ func (kl *Kubelet) HandlePodAdditions(pods []*v1.Pod) {
 	sort.Sort(sliceutils.PodsByCreationTime(pods))
 	for _, pod := range pods {
 		existingPods := kl.podManager.GetPods()
+		//将pod添加到pod管理器中，如果有pod不存在在pod管理器中，那么这个pod表示已经被删除了
 		// Always add the pod to the pod manager. Kubelet relies on the pod
 		// manager as the source of truth for the desired state. If a pod does
 		// not exist in the pod manager, it means that it has been deleted in
@@ -2097,14 +2132,17 @@ func (kl *Kubelet) HandlePodAdditions(pods []*v1.Pod) {
 			continue
 		}
 
+		// 如果该pod没有被Terminate
 		if !kl.podIsTerminated(pod) {
 			// Only go through the admission process if the pod is not
 			// terminated.
 
+			// 获取目前还在active状态的pod
 			// We failed pods that we rejected, so activePods include all admitted
 			// pods that are alive.
 			activePods := kl.filterOutTerminatedPods(existingPods)
 
+			// 验证 pod 是否能在该节点运行，如果不可以直接拒绝
 			// Check if we can admit the pod; if not, reject it.
 			if ok, reason, message := kl.canAdmitPod(activePods, pod); !ok {
 				kl.rejectPod(pod, reason, message)
@@ -2112,7 +2150,9 @@ func (kl *Kubelet) HandlePodAdditions(pods []*v1.Pod) {
 			}
 		}
 		mirrorPod, _ := kl.podManager.GetMirrorPodByPod(pod)
+		// 把 pod 分配给给 worker 做异步处理,创建pod
 		kl.dispatchWork(pod, kubetypes.SyncPodCreate, mirrorPod, start)
+		// 在 probeManager 中添加 pod，如果 pod 中定义了 readiness 和 liveness 健康检查，启动 goroutine 定期进行检测
 		kl.probeManager.AddPod(pod)
 	}
 }
