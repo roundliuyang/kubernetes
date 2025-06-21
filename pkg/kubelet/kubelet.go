@@ -1256,6 +1256,13 @@ func (kl *Kubelet) StartGarbageCollection() {
 	}, ImageGCPeriod, wait.NeverStop)
 }
 
+/*
+	1.创建创建文件目录、Container的log目录；
+	2.启动 imageManager，这个管理器实际上是realImageGCManager，我们待会看；
+	3.启动 certificate manager ，证书相关；
+	4.启动 oomWatcher监视器；
+	5.启动 resource analyzer,定时刷新volume stats到缓存中；
+*/
 // initializeModules will initialize internal modules that do not require the container runtime to be up.
 // Note that the modules here must not depend on modules that are not initialized here.
 func (kl *Kubelet) initializeModules() error {
@@ -1268,11 +1275,13 @@ func (kl *Kubelet) initializeModules() error {
 	metrics.SetNodeName(kl.nodeName)
 	servermetrics.Register()
 
+	// 创建文件目录
 	// Setup filesystem directories.
 	if err := kl.setupDataDirs(); err != nil {
 		return err
 	}
 
+	// 创建 ContainerLogsDir
 	// If the container logs directory does not exist, create it.
 	if _, err := os.Stat(ContainerLogsDir); err != nil {
 		if err := kl.os.MkdirAll(ContainerLogsDir, 0755); err != nil {
@@ -1280,19 +1289,23 @@ func (kl *Kubelet) initializeModules() error {
 		}
 	}
 
+	// 启动 imageManager
 	// Start the image manager.
 	kl.imageManager.Start()
 
+	// 启动 certificate manager ，证书相关
 	// Start the certificate manager if it was enabled.
 	if kl.serverCertificateManager != nil {
 		kl.serverCertificateManager.Start()
 	}
 
+	// 启动 oomWatcher.
 	// Start out of memory watcher.
 	if err := kl.oomWatcher.Start(kl.nodeRef); err != nil {
 		return fmt.Errorf("failed to start OOM watcher %v", err)
 	}
 
+	// 启动 resource analyzer,刷新volume stats到缓存中
 	// Start resource analyzer
 	kl.resourceAnalyzer.Start()
 
@@ -1346,14 +1359,13 @@ func (kl *Kubelet) Run(updates <-chan kubetypes.PodUpdate) {
 		kl.logServer = http.StripPrefix("/logs/", http.FileServer(http.Dir("/var/log/")))
 	}
 
-	// 警告：kubeClient 未设置
-	// • 如果没有 API Server 客户端，无法向集群上报 Node 状态
+	// 警告：kubeClient 未设置，如果没有 API Server 客户端，无法向集群上报 Node 状态
 	if kl.kubeClient == nil {
 		klog.Warning("No api server defined - no node status update will be sent.")
 	}
 
 	// 启动 cloud provider 同步模块
-	// • 如果启用了云提供商同步组件，启动它以获取或更新节点的云资源信息（如 cloud-init 标签等）
+	// 如果启用了云提供商同步组件，启动它以获取或更新节点的云资源信息（如 cloud-init 标签等）
 	// Start the cloud provider sync manager
 	if kl.cloudResourceSyncManager != nil {
 		go kl.cloudResourceSyncManager.Run(wait.NeverStop)
@@ -1366,35 +1378,31 @@ func (kl *Kubelet) Run(updates <-chan kubetypes.PodUpdate) {
 		klog.Fatal(err)
 	}
 
-	// 启动 Volume 管理器
-	// • 启动 volume manager，用于挂载卷、同步 Pod 的持久化存储状态
+	// 启动 volume manager，用于挂载卷、同步 Pod 的持久化存储状态
 	// Start volume manager
 	go kl.volumeManager.Run(kl.sourcesReady, wait.NeverStop)
 
 	if kl.kubeClient != nil {
-		// 开启与 apiserver 的同步任务（如果 kubeClient 可用）
-		// • 节点状态同步（定期更新 Node 状态）
-		// • 节点 lease 机制（用于快速判定节点是否健康）
+		// 执行 kl.syncNodeStatus 定时同步 Node 状态
 		// Start syncing node status immediately, this may set up things the runtime needs to run.
 		go wait.Until(kl.syncNodeStatus, kl.nodeStatusUpdateFrequency, wait.NeverStop)
 		go kl.fastStatusUpdateOnce()
 
+		// NodeLease 机制
 		// start syncing lease
-		// • 定时检测 container runtime（比如 Docker 或 containerd）是否“就绪”
 		go kl.nodeLeaseController.Run(wait.NeverStop)
 	}
 
 	//  更新运行时状态
 	go wait.Until(kl.updateRuntimeUp, 5*time.Second, wait.NeverStop)
 
-	// 设置 iptables 默认规则（如必要）
+	// 执行 kl.syncNetworkUtil 定时同步 iptables 规则
 	// Set up iptables util rules
 	if kl.makeIPTablesUtilChains {
 		kl.initNetworkUtil()
 	}
 
-	// 启动 Pod 杀手（终结器）
-	// • 在必要时杀死无法正确清理的 Pod（比如挂了但 worker 没有处理）
+	// 获取 pk.podKillingCh异常pod， 并定时清理异常 pod
 	// Start a goroutine responsible for killing pods (that are not properly
 	// handled by pod workers).
 	go wait.Until(kl.podKiller.PerformPodKillingWork, 1*time.Second, wait.NeverStop)
@@ -1407,20 +1415,17 @@ func (kl *Kubelet) Run(updates <-chan kubetypes.PodUpdate) {
 	kl.probeManager.Start()
 
 	// 同步 RuntimeClass（如果启用）
-	// • RuntimeClass 定义了每个 Pod 使用哪个容器运行时（如 gVisor、runc 等）
+	// RuntimeClass 定义了每个 Pod 使用哪个容器运行时（如 gVisor、runc 等）
 	// Start syncing RuntimeClasses if enabled.
 	if kl.runtimeClassManager != nil {
 		kl.runtimeClassManager.Start(wait.NeverStop)
 	}
 
-	// 启动 PLEG（Pod Lifecycle Event Generator）
-	// • 负责生成 Pod 生命周期事件（比如容器状态变更）供 Kubelet 使用。
+	// 启动 pleg 该模块主要用于周期性地向 container runtime 刷新当前所有容器的状态
 	// Start the pod lifecycle event generator.
 	kl.pleg.Start()
-	// Kubelet 的主同步循环，消费传入的 PodUpdate，执行：
-	// • 创建/删除 Pod
-	// • 更新容器
-	// • 同步状态
+
+	// 调用kl.syncLoop启动kublet事件循环
 	kl.syncLoop(updates, kl)
 }
 
@@ -1803,6 +1808,7 @@ func (kl *Kubelet) canRunPod(pod *v1.Pod) lifecycle.PodAdmitResult {
 }
 
 // 开始运行kubelet的主同步循环
+// syncLoop方法在一个循环中不断的调用syncLoopIteration方法执行主要逻辑。
 // syncLoop is the main loop for processing changes. It watches for changes from
 // three channels (file, apiserver, and http) and creates a union of them. For
 // any new change seen, will run a sync against desired state and running state. If
@@ -1904,10 +1910,11 @@ func (kl *Kubelet) syncLoop(updates <-chan kubetypes.PodUpdate, handler SyncHand
 //     containers have failed liveness checks
 func (kl *Kubelet) syncLoopIteration(configCh <-chan kubetypes.PodUpdate, handler SyncHandler,
 	syncCh <-chan time.Time, housekeepingCh <-chan time.Time, plegCh <-chan *pleg.PodLifecycleEvent) bool {
+	// 方法会监听多个 channel，当发现任何一个 channel 有数据就交给 handler 去处理，在 handler 中通过调用 dispatchWork 分发任务
 	select {
 	// configCh: 配置变更（最关键）
-	// • 从 apiserver / 文件中获取 pod 增加、更新、删除事件
-	// • 根据 u.Op 分别调用 HandlePodAdditions / HandlePodUpdates / HandlePodRemoves 等方法处理
+	// 该模块将同时 watch 3 个不同来源的 pod 信息的变化（file，http，apiserver），
+	// 一旦某个来源的 pod 信息发生了更新（创建/更新/删除），这个 channel 中就会出现被更新的 pod 信息和更新的具体操作；
 	case u, open := <-configCh:
 		// config channel关闭
 		// Update from a config source; dispatch it to the right handler
@@ -1988,10 +1995,12 @@ func (kl *Kubelet) syncLoopIteration(configCh <-chan kubetypes.PodUpdate, handle
 		}
 		klog.V(4).Infof("SyncLoop (SYNC): %d pods; %s", len(podsToSync), format.Pods(podsToSync))
 		handler.HandlePodSyncs(podsToSync)
+
 	// livenessManager：探针失败事件
 	// • 如果某个容器的存活探针失败，重新调度 pod 同步处理（比如重启容器）
 	// • 不直接用 livenessManager 的 pod 对象，而是重新从 podManager 拿一份最新的
 	case update := <-kl.livenessManager.Updates():
+		// 如果探针检测失败，需要更新pod的状态
 		if update.Result == proberesults.Failure {
 			// The liveness manager detected a failure; sync the pod.
 
@@ -2006,6 +2015,7 @@ func (kl *Kubelet) syncLoopIteration(configCh <-chan kubetypes.PodUpdate, handle
 			klog.V(1).Infof("SyncLoop (container unhealthy): %q", format.Pod(pod))
 			handler.HandlePodSyncs([]*v1.Pod{pod})
 		}
+
 	// housekeepingCh: 定期清理无用 Pod
 	// • 如果当前数据源未准备好（如 kube-apiserver还未同步完），跳过
 	// • 否则清理状态异常、被驱逐或退出的 Pod
@@ -2187,6 +2197,11 @@ func (kl *Kubelet) LatestLoopEntryTime() time.Time {
 	return val.(time.Time)
 }
 
+/*
+	updateRuntimeUp会获取container运行状态信息，然后根据返回RuntimeStatus检查网络、runtime是不是已经处于ready状态；
+	接着调用kl.initializeRuntimeDependentModules初始化依赖模块，这里会启动cadvisor、containerManager、evictionManager、
+	containerLogManager、pluginManager；最后设置Runtime同步时间。
+*/
 // updateRuntimeUp calls the container runtime status callback, initializing
 // the runtime dependent modules when the container runtime first comes up,
 // and returns an error if the status check fails.  If the status check is OK,
@@ -2195,6 +2210,7 @@ func (kl *Kubelet) updateRuntimeUp() {
 	kl.updateRuntimeMux.Lock()
 	defer kl.updateRuntimeMux.Unlock()
 
+	// 获取 containerRuntime Status
 	s, err := kl.containerRuntime.Status()
 	if err != nil {
 		klog.Errorf("Container runtime sanity check failed: %v", err)
@@ -2208,6 +2224,8 @@ func (kl *Kubelet) updateRuntimeUp() {
 	// TODO(random-liu): Consider to send node event when optional
 	// condition is unmet.
 	klog.V(4).Infof("Container runtime status: %v", s)
+
+	// 检查 network 和 runtime 是否处于 ready 状态
 	networkReady := s.GetRuntimeCondition(kubecontainer.NetworkReady)
 	if networkReady == nil || !networkReady.Status {
 		klog.Errorf("Container runtime network not ready: %v", networkReady)
@@ -2216,6 +2234,8 @@ func (kl *Kubelet) updateRuntimeUp() {
 		// Set nil if the container runtime network is ready.
 		kl.runtimeState.setNetworkState(nil)
 	}
+
+	// 获取运行时状态
 	// information in RuntimeReady condition will be propagated to NodeReady condition.
 	runtimeReady := s.GetRuntimeCondition(kubecontainer.RuntimeReady)
 	// If RuntimeReady is not set or is false, report an error.
@@ -2280,6 +2300,10 @@ func (kl *Kubelet) cleanUpContainersInPod(podID types.UID, exitedContainerID str
 	}
 }
 
+/*
+	FastStatusUpdateOnce 函数启动一个循环，尝试立即更新POD CIDR。更新pod CIDR后，它会触发运行时更新和节点状态更新。
+	函数在一次成功的节点状态更新后直接返回。该功能仅在 kubelet 启动期间执行，通过尽快更新 pod cidr、运行时状态和节点状态来提高准备就绪节点的延迟。
+*/
 // fastStatusUpdateOnce starts a loop that checks the internal node indexer cache for when a CIDR
 // is applied  and tries to update pod CIDR immediately. After pod CIDR is updated it fires off
 // a runtime update and a node status update. Function returns after one successful node status update.
@@ -2299,7 +2323,9 @@ func (kl *Kubelet) fastStatusUpdateOnce() {
 				klog.Errorf("Pod CIDR update to %v failed %v", podCIDRs, err)
 				continue
 			}
+			//更新 Runtime 状态
 			kl.updateRuntimeUp()
+			// 更新 节点 状态
 			kl.syncNodeStatus()
 			return
 		}

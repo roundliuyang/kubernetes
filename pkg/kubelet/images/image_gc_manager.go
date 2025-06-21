@@ -181,6 +181,7 @@ func (im *realImageGCManager) Start() {
 		if im.initialized {
 			ts = time.Now()
 		}
+		// 找出所有的image，并删除不再使用的image
 		_, err := im.detectImages(ts)
 		if err != nil {
 			klog.Warningf("[imageGCManager] Failed to monitor images: %v", err)
@@ -189,8 +190,10 @@ func (im *realImageGCManager) Start() {
 		}
 	}, 5*time.Minute, wait.NeverStop)
 
+	// 更新image的缓存
 	// Start a goroutine periodically updates image cache.
 	go wait.Until(func() {
+		// 调用容器接口，获取最新的image
 		images, err := im.runtime.ListImages()
 		if err != nil {
 			klog.Warningf("[imageGCManager] Failed to update image list: %v", err)
