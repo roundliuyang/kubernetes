@@ -17,7 +17,6 @@ limitations under the License.
 // Package app implements a server that runs a set of active
 // components.  This includes replication controllers, service endpoints and
 // nodes.
-//
 package app
 
 import (
@@ -79,6 +78,7 @@ func startHPAControllerWithLegacyClient(ctx ControllerContext) (http.Handler, bo
 	return startHPAControllerWithMetricsClient(ctx, metricsClient)
 }
 
+// 启动一个线程来调用NewHorizontalController方法初始化一个HPA Controller，然后执行Run方法。
 func startHPAControllerWithMetricsClient(ctx ControllerContext, metricsClient metrics.MetricsClient) (http.Handler, bool, error) {
 	hpaClient := ctx.ClientBuilder.ClientOrDie("horizontal-pod-autoscaler")
 	hpaClientConfig := ctx.ClientBuilder.ConfigOrDie("horizontal-pod-autoscaler")
@@ -91,6 +91,7 @@ func startHPAControllerWithMetricsClient(ctx ControllerContext, metricsClient me
 		return nil, false, err
 	}
 
+	// 初始化
 	go podautoscaler.NewHorizontalController(
 		hpaClient.CoreV1(),
 		scaleClient,

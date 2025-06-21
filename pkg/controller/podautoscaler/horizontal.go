@@ -161,6 +161,7 @@ func NewHorizontalController(
 	return hpaController
 }
 
+// 这里会调用worker执行具体的扩缩容的逻辑
 // Run begins watching and syncing.
 func (a *HorizontalController) Run(stopCh <-chan struct{}) {
 	defer utilruntime.HandleCrash()
@@ -173,6 +174,7 @@ func (a *HorizontalController) Run(stopCh <-chan struct{}) {
 		return
 	}
 
+	// 启动异步线程，每秒执行一次
 	// start a single worker (we may wish to start more in the future)
 	go wait.Until(a.worker, time.Second, stopCh)
 
@@ -242,6 +244,7 @@ func (a *HorizontalController) processNextWorkItem() bool {
 	return true
 }
 
+// 遍历度量目标
 // computeReplicasForMetrics computes the desired number of replicas for the metric specifications listed in the HPA,
 // returning the maximum  of the computed replica counts, a description of the associated metric, and the statuses of
 // all metrics computed.
@@ -271,7 +274,9 @@ func (a *HorizontalController) computeReplicasForMetrics(hpa *autoscalingv2.Hori
 	var invalidMetricError error
 	var invalidMetricCondition autoscalingv2.HorizontalPodAutoscalerCondition
 
+	// 这里的度量目标可以是一个列表，所以遍历之后取最大的需要扩缩容的数量
 	for i, metricSpec := range metricSpecs {
+		// 根据type类型计算需要扩缩容的数量
 		replicaCountProposal, metricNameProposal, timestampProposal, condition, err := a.computeReplicasForMetric(hpa, metricSpec, specReplicas, statusReplicas, selector, &statuses[i])
 
 		if err != nil {
@@ -281,6 +286,7 @@ func (a *HorizontalController) computeReplicasForMetrics(hpa *autoscalingv2.Hori
 			}
 			invalidMetricsCount++
 		}
+		// 记录最大的需要扩缩容的数量
 		if err == nil && (replicas == 0 || replicaCountProposal > replicas) {
 			timestamp = timestampProposal
 			replicas = replicaCountProposal
@@ -303,7 +309,9 @@ func (a *HorizontalController) computeReplicasForMetric(hpa *autoscalingv2.Horiz
 	specReplicas, statusReplicas int32, selector labels.Selector, status *autoscalingv2.MetricStatus) (replicaCountProposal int32, metricNameProposal string,
 	timestampProposal time.Time, condition autoscalingv2.HorizontalPodAutoscalerCondition, err error) {
 
+	// 根据不同的类型来进行计量
 	switch spec.Type {
+	// 表示如果是一个k8s对象，如Ingress对象
 	case autoscalingv2.ObjectMetricSourceType:
 		metricSelector, err := metav1.LabelSelectorAsSelector(spec.Object.Metric.Selector)
 		if err != nil {
@@ -314,16 +322,19 @@ func (a *HorizontalController) computeReplicasForMetric(hpa *autoscalingv2.Horiz
 		if err != nil {
 			return 0, "", time.Time{}, condition, fmt.Errorf("failed to get object metric value: %v", err)
 		}
+	// 表示pod度量类型
 	case autoscalingv2.PodsMetricSourceType:
 		metricSelector, err := metav1.LabelSelectorAsSelector(spec.Pods.Metric.Selector)
 		if err != nil {
 			condition := a.getUnableComputeReplicaCountCondition(hpa, "FailedGetPodsMetric", err)
 			return 0, "", time.Time{}, condition, fmt.Errorf("failed to get pods metric value: %v", err)
 		}
+		// 仅支持AverageValue度量目标,计算需要扩缩容的数量
 		replicaCountProposal, timestampProposal, metricNameProposal, condition, err = a.computeStatusForPodsMetric(specReplicas, spec, hpa, selector, status, metricSelector)
 		if err != nil {
 			return 0, "", time.Time{}, condition, fmt.Errorf("failed to get pods metric value: %v", err)
 		}
+	// 表示Resource度量类型
 	case autoscalingv2.ResourceMetricSourceType:
 		replicaCountProposal, timestampProposal, metricNameProposal, condition, err = a.computeStatusForResourceMetric(specReplicas, spec, hpa, selector, status)
 		if err != nil {
@@ -414,6 +425,7 @@ func (a *HorizontalController) computeStatusForObjectMetric(specReplicas, status
 
 // computeStatusForPodsMetric computes the desired number of replicas for the specified metric of type PodsMetricSourceType.
 func (a *HorizontalController) computeStatusForPodsMetric(currentReplicas int32, metricSpec autoscalingv2.MetricSpec, hpa *autoscalingv2.HorizontalPodAutoscaler, selector labels.Selector, status *autoscalingv2.MetricStatus, metricSelector labels.Selector) (replicaCountProposal int32, timestampProposal time.Time, metricNameProposal string, condition autoscalingv2.HorizontalPodAutoscalerCondition, err error) {
+	// 计算需要扩缩容的数量
 	replicaCountProposal, utilizationProposal, timestampProposal, err := a.replicaCalc.GetMetricReplicas(currentReplicas, metricSpec.Pods.Target.AverageValue.MilliValue(), metricSpec.Pods.Metric.Name, hpa.Namespace, selector, metricSelector)
 	if err != nil {
 		condition = a.getUnableComputeReplicaCountCondition(hpa, "FailedGetPodsMetric", err)
@@ -602,19 +614,23 @@ func (a *HorizontalController) reconcileAutoscaler(hpav1Shared *autoscalingv1.Ho
 
 	rescale := true
 
+	// 副本数为0，不启动自动扩缩容
 	if scale.Spec.Replicas == 0 && minReplicas != 0 {
 		// Autoscaling is disabled for this resource
 		desiredReplicas = 0
 		rescale = false
 		setCondition(hpa, autoscalingv2.ScalingActive, v1.ConditionFalse, "ScalingDisabled", "scaling is disabled since the replica count of the target is zero")
 	} else if currentReplicas > hpa.Spec.MaxReplicas {
+		// 如果当前副本数大于最大期望副本数，那么设置期望副本数为最大副本数
 		rescaleReason = "Current number of replicas above Spec.MaxReplicas"
 		desiredReplicas = hpa.Spec.MaxReplicas
 	} else if currentReplicas < minReplicas {
+		// 同上
 		rescaleReason = "Current number of replicas below Spec.MinReplicas"
 		desiredReplicas = minReplicas
 	} else {
 		var metricTimestamp time.Time
+		// 计算需要扩缩容的数量
 		metricDesiredReplicas, metricName, metricStatuses, metricTimestamp, err = a.computeReplicasForMetrics(hpa, scale, hpa.Spec.Metrics)
 		if err != nil {
 			a.setCurrentReplicasInStatus(hpa, currentReplicas)
@@ -638,6 +654,8 @@ func (a *HorizontalController) reconcileAutoscaler(hpav1Shared *autoscalingv1.Ho
 		if desiredReplicas < currentReplicas {
 			rescaleReason = "All metrics below target"
 		}
+		// 从1.18开始支持behavior字段
+		// 可以在扩缩容的时候指定一个稳定窗口，以防止缩放目标中的副本数量出现波动
 		if hpa.Spec.Behavior == nil {
 			desiredReplicas = a.normalizeDesiredReplicas(hpa, key, currentReplicas, desiredReplicas, minReplicas)
 		} else {
