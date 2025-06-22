@@ -454,16 +454,24 @@ func initConfigz(kc *kubeletconfiginternal.KubeletConfiguration) error {
 	return nil
 }
 
+/*
+	这个方法创建了一个EventBroadcaster，这是一个事件广播器，会消费EventRecorder记录的事件并通过StartStructuredLogging和
+	StartRecordingToSink分别将event发送给log和apiserver；EventRecorder，用作事件记录器，k8s系统组件通过它记录关键性事件
+*/
 // makeEventRecorder sets up kubeDeps.Recorder if it's nil. It's a no-op otherwise.
 func makeEventRecorder(kubeDeps *kubelet.Dependencies, nodeName types.NodeName) {
 	if kubeDeps.Recorder != nil {
 		return
 	}
+	// 初始化 EventBroadcaster
 	eventBroadcaster := record.NewBroadcaster()
+	// 初始化 EventRecorder
 	kubeDeps.Recorder = eventBroadcaster.NewRecorder(legacyscheme.Scheme, v1.EventSource{Component: componentKubelet, Host: string(nodeName)})
+	// 记录Event到log
 	eventBroadcaster.StartStructuredLogging(3)
 	if kubeDeps.EventClient != nil {
 		klog.V(4).Infof("Sending events to api server.")
+		// 上报Event到apiserver并存储至etcd集群
 		eventBroadcaster.StartRecordingToSink(&v1core.EventSinkImpl{Interface: kubeDeps.EventClient.Events("")})
 	} else {
 		klog.Warning("No api server defined - no events will be sent to API server.")
@@ -471,18 +479,21 @@ func makeEventRecorder(kubeDeps *kubelet.Dependencies, nodeName types.NodeName) 
 }
 
 /*
-	这段 run() 函数是 kubelet 启动初始化流程的核心代码，完成了从配置读取、资源管理器初始化，到运行 kubelet 主服务的全链路准备工作。
-	通过依赖注入的方式解耦了组件，支持灵活配置和功能切换，是 Kubernetes 节点启动过程的关键一环。
+这段 run() 函数是 kubelet 启动初始化流程的核心代码，完成了从配置读取、资源管理器初始化，到运行 kubelet 主服务的全链路准备工作。
+通过依赖注入的方式解耦了组件，支持灵活配置和功能切换，是 Kubernetes 节点启动过程的关键一环。
 
-	🧩 关键点说明
-	• standaloneMode = true：
-		• 表示 kubelet 不连接 Kubernetes API Server，适用于调试或离线场景。
-	• flock.Acquire() + watchForLockfileContention()：
-		• 提供 inotify 监听机制，监听文件锁争用情况。
-	• Kubelet 是模块化设计：
-		• 每个功能点都注入到 kubeDeps 里，比如 Cloud、Auth、CAdvisor、ContainerManager。
-	• ContainerManager 是资源管理核心：
-		• 包括：Node Allocatable、ReservedCpus、Eviction、QOS Reserved 等等。
+🧩 关键点说明
+• standaloneMode = true：
+  - 表示 kubelet 不连接 Kubernetes API Server，适用于调试或离线场景。
+
+• flock.Acquire() + watchForLockfileContention()：
+  - 提供 inotify 监听机制，监听文件锁争用情况。
+
+• Kubelet 是模块化设计：
+  - 每个功能点都注入到 kubeDeps 里，比如 Cloud、Auth、CAdvisor、ContainerManager。
+
+• ContainerManager 是资源管理核心：
+  - 包括：Node Allocatable、ReservedCpus、Eviction、QOS Reserved 等等。
 */
 func run(ctx context.Context, s *options.KubeletServer, kubeDeps *kubelet.Dependencies, featureGate featuregate.FeatureGate) (err error) {
 

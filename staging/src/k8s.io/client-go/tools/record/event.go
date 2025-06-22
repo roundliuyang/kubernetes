@@ -181,6 +181,7 @@ type eventBroadcasterImpl struct {
 	options       CorrelatorOptions
 }
 
+// 调用StartRecordingToSink方法会将数据上报到apiserver
 // StartRecordingToSink starts sending events received from the specified eventBroadcaster to the given sink.
 // The return value can be ignored or used to stop recording, if desired.
 // TODO: make me an object with parameterizable queue length and retry interval
@@ -201,6 +202,8 @@ func recordToSink(sink EventSink, event *v1.Event, eventCorrelator *EventCorrela
 	// Events are safe to copy like this.
 	eventCopy := *event
 	event = &eventCopy
+
+	// 对事件做预处理，聚合相同的事件
 	result, err := eventCorrelator.EventCorrelate(event)
 	if err != nil {
 		utilruntime.HandleError(err)
@@ -210,6 +213,7 @@ func recordToSink(sink EventSink, event *v1.Event, eventCorrelator *EventCorrela
 	}
 	tries := 0
 	for {
+		// 把事件发送到 apiserver
 		if recordEvent(sink, result.Event, result.Patch, result.Event.Count > 1, eventCorrelator) {
 			break
 		}
@@ -235,9 +239,11 @@ func recordToSink(sink EventSink, event *v1.Event, eventCorrelator *EventCorrela
 func recordEvent(sink EventSink, event *v1.Event, patch []byte, updateExistingEvent bool, eventCorrelator *EventCorrelator) bool {
 	var newEvent *v1.Event
 	var err error
+	// 更新已经存在的事件
 	if updateExistingEvent {
 		newEvent, err = sink.Patch(event, patch)
 	}
+	// 创建一个新的事件
 	// Update can fail because the event may have been removed and it no longer exists.
 	if !updateExistingEvent || (updateExistingEvent && util.IsKeyNotFoundError(err)) {
 		// Making sure that ResourceVersion is empty on creation
@@ -250,6 +256,7 @@ func recordEvent(sink EventSink, event *v1.Event, patch []byte, updateExistingEv
 		return true
 	}
 
+	// 如果是已知错误，就不要再重试了；否则，返回 false，让上层进行重试
 	// If we can't contact the server, then hold everything while we keep trying.
 	// Otherwise, something about the event is malformed and we should abandon it.
 	switch err.(type) {
@@ -292,6 +299,11 @@ func (e *eventBroadcasterImpl) StartStructuredLogging(verbosity klog.Level) watc
 		})
 }
 
+/*
+	StartRecordingToSink会调用StartEventWatcher，StartEventWatcher方法里面会异步的调用 watcher.ResultChan()方法获取到
+	broadcasterWatcher的result管道，result管道里面的数据就是Broadcaster的distribute方法进行分发的。
+	最后会回调到传入的方法recordToSink中。
+*/
 // StartEventWatcher starts sending events received from this EventBroadcaster to the given event handler function.
 // The return value can be ignored or used to stop recording, if desired.
 func (e *eventBroadcasterImpl) StartEventWatcher(eventHandler func(*v1.Event)) watch.Interface {
@@ -305,6 +317,7 @@ func (e *eventBroadcasterImpl) StartEventWatcher(eventHandler func(*v1.Event)) w
 				// ever happen.
 				continue
 			}
+			// 回调传入的方法
 			eventHandler(event)
 		}
 	}()
@@ -335,9 +348,11 @@ func (recorder *recorderImpl) generateEvent(object runtime.Object, annotations m
 		return
 	}
 
+	// 实例化Event
 	event := recorder.makeEvent(ref, annotations, eventtype, reason, message)
 	event.Source = recorder.source
 
+	// 异步调用Action方法将事件写入到incoming中
 	go func() {
 		// NOTE: events should be a non-blocking operation
 		defer utilruntime.HandleCrash()

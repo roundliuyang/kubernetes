@@ -138,6 +138,7 @@ func (f *EventSourceObjectSpamFilter) Filter(event *v1.Event) bool {
 		record.rateLimiter = flowcontrol.NewTokenBucketRateLimiterWithClock(f.qps, f.burst, f.clock)
 	}
 
+	// 使用令牌桶进行过滤
 	// ensure we have available rate
 	filter := !record.rateLimiter.TryAccept()
 
@@ -228,10 +229,10 @@ type aggregateRecord struct {
 // EventAggregate checks if a similar event has been seen according to the
 // aggregation configuration (max events, max interval, etc) and returns:
 //
-// - The (potentially modified) event that should be created
-// - The cache key for the event, for correlation purposes. This will be set to
-//   the full key for normal events, and to the result of
-//   EventAggregatorMessageFunc for aggregate events.
+//   - The (potentially modified) event that should be created
+//   - The cache key for the event, for correlation purposes. This will be set to
+//     the full key for normal events, and to the result of
+//     EventAggregatorMessageFunc for aggregate events.
 func (e *EventAggregator) EventAggregate(newEvent *v1.Event) (*v1.Event, string) {
 	now := metav1.NewTime(e.clock.Now())
 	var record aggregateRecord
@@ -243,11 +244,15 @@ func (e *EventAggregator) EventAggregate(newEvent *v1.Event) (*v1.Event, string)
 	// Do we have a record of similar events in our cache?
 	e.Lock()
 	defer e.Unlock()
+	// 查找缓存里面是否也存在这样的记录
 	value, found := e.cache.Get(aggregateKey)
 	if found {
 		record = value.(aggregateRecord)
 	}
 
+	// maxIntervalInSeconds默认时间是600s，这里校验缓存里面的记录是否太老了
+	// 如果是那么就创建一个新的
+	// 如果record在缓存里面找不到，那么lastTimestamp是零，那么也创建一个新的
 	// Is the previous record too old? If so, make a fresh one. Note: if we didn't
 	// find a similar record, its lastTimestamp will be the zero value, so we
 	// create a new one in that case.
@@ -260,8 +265,10 @@ func (e *EventAggregator) EventAggregate(newEvent *v1.Event) (*v1.Event, string)
 	// Write the new event into the aggregation record and put it on the cache
 	record.localKeys.Insert(localKey)
 	record.lastTimestamp = now
+	// 重新加入到LRU缓存中
 	e.cache.Add(aggregateKey, record)
 
+	// 如果没有达到阈值，那么不进行聚合
 	// If we are not yet over the threshold for unique events, don't correlate them
 	if uint(record.localKeys.Len()) < e.maxEvents {
 		return newEvent, eventKey
@@ -281,10 +288,11 @@ func (e *EventAggregator) EventAggregate(newEvent *v1.Event) (*v1.Event, string)
 		FirstTimestamp: now,
 		InvolvedObject: newEvent.InvolvedObject,
 		LastTimestamp:  now,
-		Message:        e.messageFunc(newEvent),
-		Type:           newEvent.Type,
-		Reason:         newEvent.Reason,
-		Source:         newEvent.Source,
+		// 将Message进行聚合
+		Message: e.messageFunc(newEvent),
+		Type:    newEvent.Type,
+		Reason:  newEvent.Reason,
+		Source:  newEvent.Source,
 	}
 	return eventCopy, aggregateKey
 }
@@ -328,9 +336,11 @@ func (e *eventLogger) eventObserve(newEvent *v1.Event, key string) (*v1.Event, [
 	e.Lock()
 	defer e.Unlock()
 
+	// 检查是否在缓存中
 	// Check if there is an existing event we should update
 	lastObservation := e.lastEventObservationFromCache(key)
 
+	// 如果大于0说明存在，并且对Count进行自增
 	// If we found a result, prepare a patch
 	if lastObservation.count > 0 {
 		// update the event based on the last observation so patch will work as desired
@@ -420,14 +430,14 @@ type EventCorrelateResult struct {
 // prior to interacting with the API server to record the event.
 //
 // The default behavior is as follows:
-//   * Aggregation is performed if a similar event is recorded 10 times in a
+//   - Aggregation is performed if a similar event is recorded 10 times in a
 //     in a 10 minute rolling interval.  A similar event is an event that varies only by
 //     the Event.Message field.  Rather than recording the precise event, aggregation
 //     will create a new event whose message reports that it has combined events with
 //     the same reason.
-//   * Events are incrementally counted if the exact same event is encountered multiple
+//   - Events are incrementally counted if the exact same event is encountered multiple
 //     times.
-//   * A source may burst 25 events about an object, but has a refill rate budget
+//   - A source may burst 25 events about an object, but has a refill rate budget
 //     per object of 1 event every 5 minutes to control long-tail of spam.
 func NewEventCorrelator(clock clock.Clock) *EventCorrelator {
 	cacheSize := maxLruCacheEntries

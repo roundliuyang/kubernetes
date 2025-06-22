@@ -61,6 +61,10 @@ type Broadcaster struct {
 	fullChannelBehavior FullChannelBehavior
 }
 
+/*
+	在这里初始化Broadcaster的时候，会初始化一个broadcasterWatcher，用于定义事件处理方式，如上报apiserver等；
+	初始化incoming，用于EventBroadcaster和EventRecorder进行事件传输。
+*/
 // NewBroadcaster creates a new Broadcaster. queueLength is the maximum number of events to queue per watcher.
 // It is guaranteed that events will be distributed in the order in which they occur,
 // but the order in which a single event is distributed among all of the watchers is unspecified.
@@ -72,6 +76,7 @@ func NewBroadcaster(queueLength int, fullChannelBehavior FullChannelBehavior) *B
 		fullChannelBehavior: fullChannelBehavior,
 	}
 	m.distributing.Add(1)
+	// 开启事件循环
 	go m.loop()
 	return m
 }
@@ -200,8 +205,13 @@ func (m *Broadcaster) Shutdown() {
 	m.distributing.Wait()
 }
 
+/*
+	这个方法会一直后台等待获取m.incoming管道中的数据，然后调用distribute方法进行事件分发给broadcasterWatcher。
+	incoming管道中的数据是EventRecorder调用Event方法传入的
+*/
 // loop receives from m.incoming and distributes to all watchers.
 func (m *Broadcaster) loop() {
+	// 获取m.incoming管道中的数据
 	// Deliberately not catching crashes here. Yes, bring down the process if there's a
 	// bug in watch.Broadcaster.
 	for event := range m.incoming {
@@ -209,16 +219,22 @@ func (m *Broadcaster) loop() {
 			event.Object.(functionFakeRuntimeObject)()
 			continue
 		}
+		// 进行事件分发
 		m.distribute(event)
 	}
 	m.closeAll()
 	m.distributing.Done()
 }
 
+/*
+	如果是非阻塞，那么使用DropIfChannelFull标识，在w.result管道满了之后，事件会丢失。如果没有default关键字，那么，当w.result管道满了之后，分发过程会阻塞并等待。
+	这里之所以需要丢失事件，是因为随着k8s集群越来越大，上报事件也随之增多，那么每次上报都要对etcd进行读写，这样会给etcd集群带来压力。但是事件丢失并不会影响集群的正常工作，所以非阻塞分发机制下事件会丢失。
+*/
 // distribute sends event to all watchers. Blocking.
 func (m *Broadcaster) distribute(event Event) {
 	m.lock.Lock()
 	defer m.lock.Unlock()
+	// 如果是非阻塞，那么使用DropIfChannelFull标识
 	if m.fullChannelBehavior == DropIfChannelFull {
 		for _, w := range m.watchers {
 			select {
