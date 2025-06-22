@@ -197,9 +197,9 @@ func (bfr *BoundedFrequencyRunner) Loop(stop <-chan struct{}) {
 			bfr.stop()
 			klog.V(3).Infof("%s Loop stopping", bfr.name)
 			return
-		case <-bfr.timer.C():
+		case <-bfr.timer.C(): // 定时器方式执行
 			bfr.tryRun()
-		case <-bfr.run:
+		case <-bfr.run: // 按需方式执行（发送运行指令信号）
 			bfr.tryRun()
 		case <-bfr.retry:
 			bfr.doRetry()
@@ -287,20 +287,22 @@ func (bfr *BoundedFrequencyRunner) tryRun() {
 	bfr.mu.Lock()
 	defer bfr.mu.Unlock()
 
+	// 限制条件允许运行func
 	if bfr.limiter.TryAccept() {
 		// We're allowed to run the function right now.
-		bfr.fn()
-		bfr.lastRun = bfr.timer.Now()
+		bfr.fn()                      // 重点执行部分，调用func，上下文来看此处就是对syncProxyRules()的调用
+		bfr.lastRun = bfr.timer.Now() // 记录运行时间
 		bfr.timer.Stop()
-		bfr.timer.Reset(bfr.maxInterval)
+		bfr.timer.Reset(bfr.maxInterval) // 重设下次运行时间
 		klog.V(3).Infof("%s: ran, next possible in %v, periodic in %v", bfr.name, bfr.minInterval, bfr.maxInterval)
 		return
 	}
 
+	// 限制条件不允许运行，计算下次运行时间
 	// It can't run right now, figure out when it can run next.
-	elapsed := bfr.timer.Since(bfr.lastRun)   // how long since last run
-	nextPossible := bfr.minInterval - elapsed // time to next possible run
-	nextScheduled := bfr.timer.Remaining()    // time to next scheduled run
+	elapsed := bfr.timer.Since(bfr.lastRun)   // how long since last run   // elapsed:上次运行时间到现在已过多久
+	nextPossible := bfr.minInterval - elapsed // time to next possible run // nextPossible:下次运行至少差多久（最小周期）
+	nextScheduled := bfr.timer.Remaining()    // time to next scheduled run // nextScheduled:下次运行最迟差多久(最大周期)
 	klog.V(4).Infof("%s: %v since last run, possible in %v, scheduled in %v", bfr.name, elapsed, nextPossible, nextScheduled)
 
 	// It's hard to avoid race conditions in the unit tests unless we always reset

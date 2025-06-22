@@ -1,3 +1,4 @@
+//go:build !windows
 // +build !windows
 
 /*
@@ -71,6 +72,7 @@ import (
 // node after it is registered.
 var timeoutForNodePodCIDR = 5 * time.Minute
 
+// 根据proxyMode来选择是IPVS还是IPTables，ipvs会调用ipvs.NewProxier方法来初始化一个proxier
 // NewProxyServer returns a new ProxyServer.
 func NewProxyServer(o *Options) (*ProxyServer, error) {
 	return newProxyServer(o.config, o.CleanupAndExit, o.master)
@@ -163,6 +165,7 @@ func newProxyServer(
 	var proxier proxy.Provider
 	var detectLocalMode proxyconfigapi.LocalMode
 
+	// 获取代理模式userspace iptables ipvs
 	proxyMode := getProxyMode(string(config.Mode), canUseIPVS, iptables.LinuxKernelCompatTester{})
 	detectLocalMode, err = getDetectLocalMode(config)
 	if err != nil {
@@ -181,6 +184,7 @@ func newProxyServer(
 
 	klog.V(2).Info("DetectLocalMode: '", string(detectLocalMode), "'")
 
+	// 代理模式是iptables
 	if proxyMode == proxyModeIPTables {
 		klog.V(0).Info("Using iptables Proxier.")
 		if config.IPTables.MasqueradeBit == nil {
@@ -226,6 +230,7 @@ func newProxyServer(
 				config.NodePortAddresses,
 			)
 		} else { // Create a single-stack proxier.
+			// 代理模式是ipvs
 			var localDetector proxyutiliptables.LocalTrafficDetector
 			localDetector, err = getLocalDetector(detectLocalMode, config, iptInterface, nodeInfo)
 			if err != nil {
@@ -256,6 +261,7 @@ func newProxyServer(
 		proxymetrics.RegisterMetrics()
 	} else if proxyMode == proxyModeIPVS {
 		klog.V(0).Info("Using ipvs Proxier.")
+		// 判断是够启用了 ipv6 双栈
 		if utilfeature.DefaultFeatureGate.Enabled(features.IPv6DualStack) {
 			klog.V(0).Info("creating dualStackProxier for ipvs.")
 
@@ -310,6 +316,7 @@ func newProxyServer(
 				return nil, fmt.Errorf("unable to create proxier: %v", err)
 			}
 
+			// 初始化 ipvs 模式的 proxier
 			proxier, err = ipvs.NewProxier(
 				iptInterface,
 				ipvsInterface,

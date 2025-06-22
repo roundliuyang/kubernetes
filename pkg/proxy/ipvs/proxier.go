@@ -324,6 +324,15 @@ func parseExcludedCIDRs(excludeCIDRs []string) []*net.IPNet {
 	return cidrExclusions
 }
 
+/*
+	1.对于 SNAT iptables 规则生成 masquerade 标记；
+	2.设置默认调度算法 rr；
+	3.healthcheck服务器对象创建；
+	4.初始化 proxier；
+	5.初始化 ipset 规则；
+	6.初始化 syncRunner；
+	7.启动 gracefuldeleteManager
+*/
 // NewProxier returns a new Proxier given an iptables and ipvs Interface instance.
 // Because of the iptables and ipvs logic, it is assumed that there is only a single Proxier active on a machine.
 // An error will be returned if it fails to update or acquire the initial lock.
@@ -422,6 +431,7 @@ func NewProxier(ipt utiliptables.Interface,
 		}
 	}
 
+	// 对于 SNAT iptables 规则生成 masquerade 标记
 	// Generate the masquerade mark to use for SNAT rules.
 	masqueradeValue := 1 << uint(masqueradeBit)
 	masqueradeMark := fmt.Sprintf("%#08x", masqueradeValue)
@@ -430,11 +440,13 @@ func NewProxier(ipt utiliptables.Interface,
 
 	klog.V(2).Infof("nodeIP: %v, isIPv6: %v", nodeIP, isIPv6)
 
+	// 设置默认调度算法 rr
 	if len(scheduler) == 0 {
 		klog.Warningf("IPVS scheduler not specified, use %s by default", DefaultScheduler)
 		scheduler = DefaultScheduler
 	}
 
+	// healthcheck服务器对象创建
 	serviceHealthServer := healthcheck.NewServiceHealthServer(hostname, recorder)
 
 	endpointSlicesEnabled := utilfeature.DefaultFeatureGate.Enabled(features.EndpointSliceProxying)
@@ -444,6 +456,7 @@ func NewProxier(ipt utiliptables.Interface,
 	if len(incorrectAddresses) > 0 {
 		klog.Warning("NodePortAddresses of wrong family; ", incorrectAddresses)
 	}
+	//初始化 proxier
 	proxier := &Proxier{
 		portsMap:              make(map[utilproxy.LocalPort]utilproxy.Closeable),
 		serviceMap:            make(proxy.ServiceMap),
@@ -479,6 +492,8 @@ func NewProxier(ipt utiliptables.Interface,
 		networkInterfacer:     utilproxy.RealNetwork{},
 		gracefuldeleteManager: NewGracefulTerminationManager(ipvs),
 	}
+
+	// 初始化 ipset 规则
 	// initialize ipsetList with all sets we needed
 	proxier.ipsetList = make(map[string]*IPSet)
 	for _, is := range ipsetInfo {
@@ -487,7 +502,10 @@ func NewProxier(ipt utiliptables.Interface,
 	burstSyncs := 2
 	klog.V(2).Infof("ipvs(%s) sync params: minSyncPeriod=%v, syncPeriod=%v, burstSyncs=%d",
 		ipt.Protocol(), minSyncPeriod, syncPeriod, burstSyncs)
+
+	// 初始化 syncRunner
 	proxier.syncRunner = async.NewBoundedFrequencyRunner("sync-runner", proxier.syncProxyRules, minSyncPeriod, syncPeriod, burstSyncs)
+	// 启动 gracefuldeleteManager
 	proxier.gracefuldeleteManager.Run()
 	return proxier, nil
 }
@@ -1036,6 +1054,7 @@ func (proxier *Proxier) syncProxyRules() {
 	localAddrSet := utilnet.IPSet{}
 	localAddrSet.Insert(localAddrs...)
 
+	// 更新 service 与 endpoint变化信息
 	// We assume that if this was called, we really want to sync them,
 	// even if nothing changed in the meantime. In other words, callers are
 	// responsible for detecting no-op changes and not calling this function.
@@ -1043,6 +1062,8 @@ func (proxier *Proxier) syncProxyRules() {
 	endpointUpdateResult := proxier.endpointsMap.Update(proxier.endpointsChanges)
 
 	staleServices := serviceUpdateResult.UDPStaleClusterIP
+
+	// 合并 service 列表
 	// merge stale services gathered from updateEndpointsMap
 	for _, svcPortName := range endpointUpdateResult.StaleServiceNames {
 		if svcInfo, ok := proxier.serviceMap[svcPortName]; ok && svcInfo != nil && conntrack.IsClearConntrackNeeded(svcInfo.Protocol()) {
@@ -1058,19 +1079,25 @@ func (proxier *Proxier) syncProxyRules() {
 
 	// Begin install iptables
 
+	// nat链
 	// Reset all buffers used later.
 	// This is to avoid memory reallocations and thus improve performance.
 	proxier.natChains.Reset()
+	// nat规则
 	proxier.natRules.Reset()
+	// filter链
 	proxier.filterChains.Reset()
+	// filter规则
 	proxier.filterRules.Reset()
 
 	// Write table headers.
 	writeLine(proxier.filterChains, "*filter")
 	writeLine(proxier.natChains, "*nat")
 
+	// 创建kubernetes的表连接链数据
 	proxier.createAndLinkeKubeChain()
 
+	// 创建 dummy interface kube-ipvs0
 	// make sure dummy interface exists in the system where ipvs Proxier will bind service address on it
 	_, err = proxier.netlinkHandle.EnsureDummyDevice(DefaultDummyDevice)
 	if err != nil {
@@ -1078,6 +1105,7 @@ func (proxier *Proxier) syncProxyRules() {
 		return
 	}
 
+	// 创建默认的 ipset 规则，http://ipset.netfilter.org/
 	// make sure ip sets exists in the system.
 	for _, set := range proxier.ipsetList {
 		if err := ensureIPSet(set); err != nil {
@@ -1137,6 +1165,7 @@ func (proxier *Proxier) syncProxyRules() {
 		}
 	}
 
+	// 遍历proxier.serviceMap，对每一个服务创建 ipvs 规则
 	// Build IPVS rules for each service.
 	for svcName, svc := range proxier.serviceMap {
 		svcInfo, ok := svc.(*serviceInfo)
@@ -1150,6 +1179,7 @@ func (proxier *Proxier) syncProxyRules() {
 		// to ServicePortName.String() show up in CPU profiles.
 		svcNameString := svcName.String()
 
+		// 基于此服务的有效endpoint列表，更新KUBE-LOOP-BACK的ipset集，以备后面生成相应iptables规则(SNAT伪装地址)
 		// Handle traffic that loops back to the originator with SNAT.
 		for _, e := range proxier.endpointsMap[svcName] {
 			ep, ok := e.(*proxy.BaseEndpointInfo)
@@ -1188,13 +1218,19 @@ func (proxier *Proxier) syncProxyRules() {
 			Protocol: protocol,
 			SetType:  utilipset.HashIPPort,
 		}
+
+		// 校验KUBE-LOOP-BACK集合entry记录项
 		// add service Cluster IP:Port to kubeServiceAccess ip set for the purpose of solving hairpin.
 		// proxier.kubeServiceAccessSet.activeEntries.Insert(entry.String())
 		if valid := proxier.ipsetList[kubeClusterIPSet].validateEntry(entry); !valid {
 			klog.Errorf("%s", fmt.Sprintf(EntryInvalidErr, entry, proxier.ipsetList[kubeClusterIPSet].Name))
 			continue
 		}
+
+		// 名为KUBE-CLUSTER-IP的ipset集插入entry,以备后面统一生成IPtables规则
 		proxier.ipsetList[kubeClusterIPSet].activeEntries.Insert(entry.String())
+
+		// 构建ipvs虚拟服务器VS服务对象
 		// ipvs call
 		serv := &utilipvs.VirtualServer{
 			Address:   svcInfo.ClusterIP(),
@@ -1202,15 +1238,21 @@ func (proxier *Proxier) syncProxyRules() {
 			Protocol:  string(svcInfo.Protocol()),
 			Scheduler: proxier.ipvsScheduler,
 		}
+
+		// 设置IPVS服务的会话保持标志和超时时间
 		// Set session affinity flag and timeout for IPVS service
 		if svcInfo.SessionAffinityType() == v1.ServiceAffinityClientIP {
 			serv.Flags |= utilipvs.FlagPersistent
 			serv.Timeout = uint32(svcInfo.StickyMaxAgeSeconds())
 		}
+
+		// 将clusterIP绑定至dummy虚拟接口上，syncService()处理中需置bindAddr地址为True
 		// We need to bind ClusterIP to dummy interface, so set `bindAddr` parameter to `true` in syncService()
 		if err := proxier.syncService(svcNameString, serv, true, bindedAddresses); err == nil {
 			activeIPVSServices[serv.String()] = true
 			activeBindAddrs[serv.Address.String()] = true
+
+			// 同步endpoints信息，IPVS为VS更新realServer
 			// ExternalTrafficPolicy only works for NodePort and external LB traffic, does not affect ClusterIP
 			// So we still need clusterIP rules in onlyNodeLocalEndpoints mode.
 			if err := proxier.syncEndpoint(svcName, false, serv); err != nil {
@@ -1255,6 +1297,7 @@ func (proxier *Proxier) syncProxyRules() {
 				}
 			} // We're holding the port, so it's OK to install IPVS rules.
 
+			// 构建ipset entry
 			// ipset call
 			entry := &utilipset.Entry{
 				IP:       externalIP,
@@ -1305,9 +1348,11 @@ func (proxier *Proxier) syncProxyRules() {
 			}
 		}
 
+		// 为 load-balancer类型创建 ipvs 规则
 		// Capture load-balancer ingress.
 		for _, ingress := range svcInfo.LoadBalancerIPStrings() {
 			if ingress != "" {
+				// 构建ipset entry
 				// ipset call
 				entry = &utilipset.Entry{
 					IP:       ingress,
@@ -1323,6 +1368,8 @@ func (proxier *Proxier) syncProxyRules() {
 					klog.Errorf("%s", fmt.Sprintf(EntryInvalidErr, entry, proxier.ipsetList[kubeLoadBalancerSet].Name))
 					continue
 				}
+
+				// KUBE-LOAD-BALANCER ipset集更新
 				proxier.ipsetList[kubeLoadBalancerSet].activeEntries.Insert(entry.String())
 				// insert loadbalancer entry to lbIngressLocalSet if service externaltrafficpolicy=local
 				if svcInfo.OnlyNodeLocalEndpoints() {
@@ -1332,6 +1379,8 @@ func (proxier *Proxier) syncProxyRules() {
 					}
 					proxier.ipsetList[kubeLoadBalancerLocalSet].activeEntries.Insert(entry.String())
 				}
+
+				// 服务的LoadBalancerSourceRanges被指定时，基于源IP保护的防火墙策略开启，KUBE-LOAD-BALANCER-FW ipset集更新
 				if len(svcInfo.LoadBalancerSourceRanges()) != 0 {
 					// The service firewall rules are created based on ServiceSpec.loadBalancerSourceRanges field.
 					// This currently works for loadbalancers that preserves source ips.
@@ -1856,17 +1905,28 @@ func (proxier *Proxier) acceptIPVSTraffic() {
 	}
 }
 
+/*
+	createAndLinkeKubeChain方法首先会获取现存的filter和NAT表，然后再遍历iptablesChains。
+	iptablesChains里面保存了NAT表链和Filter表链：NAT表链 KUBE-SERVICES / KUBE-POSTROUTING / KUBE-FIREWALL KUBE-NODE-PORT / KUBE-LOAD-BALANCER / KUBE-MARK-MASQ；Filter表链 KUBE-FORWARD；
+	然后再根据iptablesJumpChain创建跳转规则。
+*/
 // createAndLinkeKubeChain create all kube chains that ipvs proxier need and write basic link.
 func (proxier *Proxier) createAndLinkeKubeChain() {
+	// 通过iptables-save获取现有的filter和NAT表存在的链数据
 	existingFilterChains := proxier.getExistingChains(proxier.filterChainsData, utiliptables.TableFilter)
 	existingNATChains := proxier.getExistingChains(proxier.iptablesData, utiliptables.TableNAT)
 
+	// NAT表链： KUBE-SERVICES / KUBE-POSTROUTING / KUBE-FIREWALL
+	//          KUBE-NODE-PORT / KUBE-LOAD-BALANCER / KUBE-MARK-MASQ
+	// Filter表链： KUBE-FORWARD
 	// Make sure we keep stats for the top-level chains
 	for _, ch := range iptablesChains {
+		// 不存在则创建链，创建顶层链
 		if _, err := proxier.iptables.EnsureChain(ch.table, ch.chain); err != nil {
 			klog.Errorf("Failed to ensure that %s chain %s exists: %v", ch.table, ch.chain, err)
 			return
 		}
+		// nat表写链
 		if ch.table == utiliptables.TableNAT {
 			if chain, ok := existingNATChains[ch.chain]; ok {
 				writeBytesLine(proxier.natChains, chain)
@@ -1874,6 +1934,7 @@ func (proxier *Proxier) createAndLinkeKubeChain() {
 				writeLine(proxier.natChains, utiliptables.MakeChainLine(kubePostroutingChain))
 			}
 		} else {
+			// filter表写链
 			if chain, ok := existingFilterChains[KubeForwardChain]; ok {
 				writeBytesLine(proxier.filterChains, chain)
 			} else {
@@ -1882,6 +1943,11 @@ func (proxier *Proxier) createAndLinkeKubeChain() {
 		}
 	}
 
+	// 默认链下创建kubernete服务专用跳转规则
+	// iptables -I OUTPUT -t nat --comment "kubernetes service portals" -j KUBE-SERVICES
+	// iptables -I PREROUTING -t nat --comment "kubernetes service portals" -j KUBE-SERVICES
+	// iptables -I POSTROUTING -t nat --comment "kubernetes postrouting rules" -j KUBE-POSTROUTING
+	// iptables -I FORWARD -t filter --comment "kubernetes forwarding rules" -j KUBE-FORWARD
 	for _, jc := range iptablesJumpChain {
 		args := []string{"-m", "comment", "--comment", jc.comment, "-j", string(jc.to)}
 		if _, err := proxier.iptables.EnsureRule(utiliptables.Prepend, jc.table, jc.from, args...); err != nil {

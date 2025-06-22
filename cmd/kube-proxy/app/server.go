@@ -775,6 +775,7 @@ func (s *ProxyServer) Run() error {
 	// Birth Cry after the birth is successful
 	s.birthCry()
 
+	// 调用ipvs的SyncLoop方法
 	go s.Proxier.SyncLoop()
 
 	return <-errCh
